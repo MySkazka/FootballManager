@@ -72,6 +72,8 @@ export {
   getBuyNegotiation,
   evaluateBuyOffer,
   raiseBuyOffer,
+  swapCreditForPlayers,
+  listSwapCandidates,
   evaluateLoanWillingness,
   listLoanTargets,
   loanPlayer,

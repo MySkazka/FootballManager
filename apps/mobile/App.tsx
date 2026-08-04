@@ -38,6 +38,8 @@ import {
   getActiveTransferWindow,
   getBuyNegotiation,
   getNextTransferWindow,
+  listSwapCandidates,
+  swapCreditForPlayers,
   groupFixturesByDate,
   hasContinentalAccess,
   uefaRanking,
@@ -185,6 +187,7 @@ export default function App() {
     playerId: string;
     offer: number;
     feedback?: string;
+    swapIds: string[];
   }>(null);
 
   const startBuyDeal = (playerId: string) => {
@@ -197,7 +200,8 @@ export default function App() {
     setBuyDeal({
       playerId,
       offer: neg.marketValue,
-      feedback: `Рыночная оценка ${formatMarketValue(neg.marketValue)}. Клуб редко отдаёт игрока сразу по этой сумме — можно повысить предложение (обычно до ~${formatMarketValue(neg.hardCeil)}).`,
+      swapIds: [],
+      feedback: `Рыночная оценка ${formatMarketValue(neg.marketValue)}. Можно предложить своих игроков в обмен и снизить кэш. Обычно потолок торга ~${formatMarketValue(neg.hardCeil)}.`,
     });
   };
 
@@ -208,8 +212,16 @@ export default function App() {
         save={save}
         playerId={buyDeal.playerId}
         offer={buyDeal.offer}
+        swapIds={buyDeal.swapIds}
         feedback={buyDeal.feedback}
-        onChangeOffer={(offer, feedback) => setBuyDeal({ playerId: buyDeal.playerId, offer, feedback })}
+        onChangeOffer={(offer, feedback, swapIds) =>
+          setBuyDeal({
+            playerId: buyDeal.playerId,
+            offer,
+            feedback,
+            swapIds: swapIds ?? buyDeal.swapIds,
+          })
+        }
         onClose={() => setBuyDeal(null)}
         onBought={(next) => {
           setSave(next);
@@ -2829,6 +2841,7 @@ function BuyNegotiationModal({
   save,
   playerId,
   offer,
+  swapIds,
   feedback,
   onChangeOffer,
   onClose,
@@ -2838,14 +2851,28 @@ function BuyNegotiationModal({
   save: CareerSave;
   playerId: string;
   offer: number;
+  swapIds: string[];
   feedback?: string;
-  onChangeOffer: (offer: number, feedback?: string) => void;
+  onChangeOffer: (offer: number, feedback?: string, swapIds?: string[]) => void;
   onClose: () => void;
   onBought: (save: CareerSave) => void;
 }) {
   const player = save.players.find((p) => p.id === playerId);
   const neg = getBuyNegotiation(pack, save, playerId);
   const budget = clubBudget(save, save.clubId);
+  const swapCandidates = useMemo(
+    () => listSwapCandidates(save, playerId).slice(0, 14),
+    [save, playerId]
+  );
+  const swapPlayers = useMemo(
+    () =>
+      swapIds
+        .map((id) => save.players.find((p) => p.id === id))
+        .filter((p): p is Player => !!p),
+    [swapIds, save.players]
+  );
+  const swapCredit = swapCreditForPlayers(swapPlayers);
+
   if (!player || !neg) {
     return (
       <AppDialog
@@ -2859,20 +2886,38 @@ function BuyNegotiationModal({
   const from = pack.clubs.find((c) => c.id === player.clubId);
   const canAfford = budget >= offer;
   const atCeil = offer >= neg.hardCeil - 0.05;
+  const packageValue = Math.round((offer + swapCredit) * 10) / 10;
+
+  const toggleSwap = (id: string) => {
+    let next = swapIds.includes(id) ? swapIds.filter((x) => x !== id) : [...swapIds, id];
+    if (next.length > 2) next = next.slice(-2);
+    const selected = next
+      .map((x) => save.players.find((p) => p.id === x))
+      .filter((p): p is Player => !!p);
+    const credit = swapCreditForPlayers(selected);
+    const suggested = Math.max(0.5, Math.round((neg.marketValue - credit) * 10) / 10);
+    onChangeOffer(
+      Math.min(neg.hardCeil, Math.max(0.5, suggested)),
+      selected.length
+        ? `В обмен: ${selected.map((p) => p.lastName).join(", ")} (−${formatMarketValue(credit)} к кэшу).`
+        : "Обмен убран — снова чисто денежное предложение.",
+      next
+    );
+  };
 
   const submit = () => {
     if (!canAfford) {
-      onChangeOffer(offer, `Недостаточно бюджета (есть ${formatMarketValue(budget)}).`);
+      onChangeOffer(offer, `Недостаточно бюджета (есть ${formatMarketValue(budget)}).`, swapIds);
       return;
     }
-    const verdict = evaluateBuyOffer(neg, offer);
+    const verdict = evaluateBuyOffer(neg, offer, { pack, save, swapPlayers });
     if (verdict.status !== "accept") {
-      onChangeOffer(offer, verdict.message);
+      onChangeOffer(offer, verdict.message, swapIds);
       return;
     }
-    const result = buyPlayer(pack, save, playerId, offer);
+    const result = buyPlayer(pack, save, playerId, offer, swapIds);
     if (!result.ok) {
-      onChangeOffer(offer, result.error ?? "Сделка не состоялась.");
+      onChangeOffer(offer, result.error ?? "Сделка не состоялась.", swapIds);
       return;
     }
     onBought(result.save);
@@ -2881,54 +2926,96 @@ function BuyNegotiationModal({
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.dialogOverlay}>
-        <View style={styles.dialogCard}>
+        <View style={[styles.dialogCard, { maxHeight: "88%" }]}>
           <Text style={styles.dialogTitle}>Торг за игрока</Text>
-          <Text style={styles.dialogBody}>
-            {playerDisplayName(player)}
-            {from ? ` («${from.name}»)` : ""}
-            {"\n"}Рынок: {formatMarketValue(neg.marketValue)} · потолок торга ~{formatMarketValue(neg.hardCeil)}
-            {"\n"}Ваше предложение: {formatMarketValue(offer)}
-            {"\n"}Бюджет: {formatMarketValue(budget)}
-          </Text>
-          {feedback ? <Text style={styles.negoFeedback}>{feedback}</Text> : null}
-          <View style={styles.negoRaiseRow}>
-            <Pressable
-              style={[styles.negoRaiseBtn, atCeil && { opacity: 0.4 }]}
-              disabled={atCeil}
-              onPress={() =>
-                onChangeOffer(
-                  raiseBuyOffer(offer, neg.marketValue, neg.hardCeil, "small"),
-                  "Повысили предложение на ~5%."
-                )
-              }
-            >
-              <Text style={styles.negoRaiseText}>+5%</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.negoRaiseBtn, atCeil && { opacity: 0.4 }]}
-              disabled={atCeil}
-              onPress={() =>
-                onChangeOffer(
-                  raiseBuyOffer(offer, neg.marketValue, neg.hardCeil, "medium"),
-                  "Повысили предложение на ~10%."
-                )
-              }
-            >
-              <Text style={styles.negoRaiseText}>+10%</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.negoRaiseBtn, atCeil && { opacity: 0.4 }]}
-              disabled={atCeil}
-              onPress={() =>
-                onChangeOffer(
-                  raiseBuyOffer(offer, neg.marketValue, neg.hardCeil, "large"),
-                  "Крупная прибавка — ближе к потолку рынка."
-                )
-              }
-            >
-              <Text style={styles.negoRaiseText}>+20%</Text>
-            </Pressable>
-          </View>
+          <ScrollView style={{ maxHeight: 420 }} keyboardShouldPersistTaps="handled">
+            <Text style={styles.dialogBody}>
+              {playerDisplayName(player)}
+              {from ? ` («${from.name}»)` : ""}
+              {"\n"}Рынок: {formatMarketValue(neg.marketValue)} · потолок кэша ~{formatMarketValue(neg.hardCeil)}
+              {"\n"}Кэш: {formatMarketValue(offer)}
+              {swapPlayers.length
+                ? `\nОбмен: ${swapPlayers.map((p) => p.lastName).join(", ")} (~${formatMarketValue(swapCredit)})`
+                : ""}
+              {"\n"}Пакет ≈ {formatMarketValue(packageValue)}
+              {"\n"}Бюджет: {formatMarketValue(budget)}
+            </Text>
+            {feedback ? <Text style={styles.negoFeedback}>{feedback}</Text> : null}
+
+            <Text style={[styles.needsTitle, { marginTop: 10 }]}>Игроки в обмен (до 2)</Text>
+            <Text style={styles.hint}>Отметьте своих — кэш предложения пересчитается.</Text>
+            {swapCandidates.map((p) => {
+              const on = swapIds.includes(p.id);
+              return (
+                <Pressable
+                  key={p.id}
+                  onPress={() => toggleSwap(p.id)}
+                  style={[styles.swapRow, on && styles.swapRowOn]}
+                >
+                  <PersonPortrait
+                    seed={p.id}
+                    size={28}
+                    jersey={pack.clubs.find((c) => c.id === save.clubId)?.colors[0]}
+                    jerseySecondary={pack.clubs.find((c) => c.id === save.clubId)?.colors[1]}
+                    age={p.age}
+                    portraitId={p.portraitId}
+                    nationalityId={p.nationalityId}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.clubName} numberOfLines={1}>
+                      {playerDisplayName(p)}
+                    </Text>
+                    <Text style={styles.clubCity}>
+                      {preferredRoleLabel(p)} · {p.overall} · {formatMarketValue(p.marketValue)}
+                    </Text>
+                  </View>
+                  <Text style={on ? styles.swapCheckOn : styles.swapCheck}>{on ? "✓" : "+"}</Text>
+                </Pressable>
+              );
+            })}
+
+            <View style={styles.negoRaiseRow}>
+              <Pressable
+                style={[styles.negoRaiseBtn, atCeil && { opacity: 0.4 }]}
+                disabled={atCeil}
+                onPress={() =>
+                  onChangeOffer(
+                    raiseBuyOffer(offer, neg.marketValue, neg.hardCeil, "small"),
+                    "Повысили кэш на ~5%.",
+                    swapIds
+                  )
+                }
+              >
+                <Text style={styles.negoRaiseText}>+5%</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.negoRaiseBtn, atCeil && { opacity: 0.4 }]}
+                disabled={atCeil}
+                onPress={() =>
+                  onChangeOffer(
+                    raiseBuyOffer(offer, neg.marketValue, neg.hardCeil, "medium"),
+                    "Повысили кэш на ~10%.",
+                    swapIds
+                  )
+                }
+              >
+                <Text style={styles.negoRaiseText}>+10%</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.negoRaiseBtn, atCeil && { opacity: 0.4 }]}
+                disabled={atCeil}
+                onPress={() =>
+                  onChangeOffer(
+                    raiseBuyOffer(offer, neg.marketValue, neg.hardCeil, "large"),
+                    "Крупная прибавка кэша.",
+                    swapIds
+                  )
+                }
+              >
+                <Text style={styles.negoRaiseText}>+20%</Text>
+              </Pressable>
+            </View>
+          </ScrollView>
           <View style={styles.dialogActions}>
             <Pressable style={styles.dialogBtnGhost} onPress={onClose}>
               <Text style={styles.dialogBtnGhostText}>Отмена</Text>
@@ -3034,9 +3121,18 @@ function TransfersScreen({
   const next = getNextTransferWindow(save);
   const budget = clubBudget(save, save.clubId);
   const club = pack.clubs.find((c) => c.id === save.clubId)!;
-  const targets = listTransferTargets(pack, save, { leagueOnly: false, limit: 400 });
-  const loanTargets = useMemo(() => listLoanTargets(pack, save, { limit: 200 }), [pack, save]);
-  const loanOutCandidates = useMemo(() => listLoanOutCandidates(pack, save), [pack, save]);
+  const targets = useMemo(
+    () => listTransferTargets(pack, save, { leagueOnly: false, limit: 120 }),
+    [pack, save]
+  );
+  const loanTargets = useMemo(
+    () => (tab === "loan" ? listLoanTargets(pack, save, { limit: 80 }) : []),
+    [pack, save, tab]
+  );
+  const loanOutCandidates = useMemo(
+    () => (tab === "loanOut" ? listLoanOutCandidates(pack, save) : []),
+    [pack, save, tab]
+  );
   const needs = useMemo(
     () => analyzeSquadNeeds(save.players, save.clubId, save.userTactics),
     [save.players, save.clubId, save.userTactics]
@@ -4579,6 +4675,18 @@ const styles = StyleSheet.create({
   atmosphereLine: { color: "#A8BDB0", fontSize: 12, lineHeight: 17 },
   atmosphereWeather: { color: "#C6A75E", fontSize: 12, lineHeight: 17 },
   atmosphereLive: { color: "#8FA396", fontSize: 11, marginTop: 2, maxWidth: 140, textAlign: "center" },
+  swapRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#24332C",
+  },
+  swapRowOn: { backgroundColor: "#1A2E26" },
+  swapCheck: { color: "#6A7A70", fontSize: 16, width: 22, textAlign: "center" },
+  swapCheckOn: { color: "#C6A75E", fontSize: 16, fontWeight: "700", width: 22, textAlign: "center" },
   awardsLeague: { color: "#8FA396", fontSize: 13, marginBottom: 12 },
   awardsHero: {
     borderWidth: 1,

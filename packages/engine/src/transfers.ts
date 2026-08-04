@@ -258,37 +258,136 @@ export type OfferDecision =
   | { status: "insult"; message: string }
   | { status: "cap"; message: string };
 
+const MAX_SWAP_PLAYERS = 2;
+
+/** How much cash a swap player offsets in negotiations (~80% of MV). */
+export function swapCreditForPlayers(players: Player[]): number {
+  if (!players.length) return 0;
+  return roundFee(players.reduce((s, p) => s + Math.max(0.3, p.marketValue ?? 0) * 0.8, 0));
+}
+
+export function listSwapCandidates(save: CareerSave, targetPlayerId?: string): Player[] {
+  return save.players
+    .filter(
+      (p) =>
+        p.clubId === save.clubId &&
+        !p.loan &&
+        p.id !== targetPlayerId
+    )
+    .sort((a, b) => (a.marketValue ?? 0) - (b.marketValue ?? 0) || a.overall - b.overall);
+}
+
+function sellerValuesSwap(
+  pack: WorldPack,
+  save: CareerSave,
+  sellerClubId: string,
+  swapPlayers: Player[]
+): { ok: boolean; message?: string; bonus: number } {
+  if (!swapPlayers.length) return { ok: true, bonus: 0 };
+  if (swapPlayers.length > MAX_SWAP_PLAYERS) {
+    return { ok: false, message: `В обмен можно предложить не больше ${MAX_SWAP_PLAYERS} игроков.`, bonus: 0 };
+  }
+  const needs = analyzeSquadNeeds(save.players, sellerClubId);
+  const want = new Set(topSquadNeedPositions(needs, 3));
+  const sellerSquad = save.players.filter((p) => p.clubId === sellerClubId && !p.loan);
+  const sellerRep = pack.clubs.find((c) => c.id === sellerClubId)?.reputation ?? 70;
+  let bonus = 0;
+
+  for (const sp of swapPlayers) {
+    if (sp.clubId !== save.clubId || sp.loan) {
+      return { ok: false, message: "В обмен можно отдавать только своих игроков не в аренде.", bonus: 0 };
+    }
+    if (sp.overall >= 88) {
+      return {
+        ok: false,
+        message: `«${pack.clubs.find((c) => c.id === sellerClubId)?.shortName ?? "Клуб"}» не хочет брать звезду ${sp.overall} взамен — просят деньги.`,
+        bonus: 0,
+      };
+    }
+    const pos = primaryPosition(sp);
+    const depth = sellerSquad.filter((p) => primaryPosition(p) === pos).length;
+    if (want.has(pos) || depth < 3) {
+      bonus += Math.max(0.3, (sp.marketValue ?? 0) * 0.12);
+    } else if (sp.overall + 6 < sellerRep) {
+      // Clear downgrade they don't need — low credit already applied; soft reject if all are junk
+      bonus -= 0.4;
+    } else {
+      bonus += 0.15;
+    }
+  }
+  return { ok: true, bonus: roundFee(bonus) };
+}
+
 /** Seller reaction to an offer (does not mutate save). */
-export function evaluateBuyOffer(neg: BuyNegotiation, offer: number): OfferDecision {
+export function evaluateBuyOffer(
+  neg: BuyNegotiation,
+  offer: number,
+  opts?: {
+    pack?: WorldPack;
+    save?: CareerSave;
+    swapPlayers?: Player[];
+  }
+): OfferDecision {
   const fee = roundFee(offer);
-  if (fee > neg.hardCeil + 0.05) {
+  const swaps = opts?.swapPlayers ?? [];
+  const swapCredit = swapCreditForPlayers(swaps);
+  let sellerBonus = 0;
+
+  if (swaps.length && opts?.pack && opts?.save) {
+    const valued = sellerValuesSwap(opts.pack, opts.save, neg.sellerClubId, swaps);
+    if (!valued.ok) {
+      return { status: "reject", message: valued.message ?? "Обмен отклонён." };
+    }
+    sellerBonus = valued.bonus;
+  } else if (swaps.length && (!opts?.pack || !opts?.save)) {
+    // Without context still count raw swap credit
+  }
+
+  const totalValue = roundFee(fee + swapCredit + Math.max(0, sellerBonus));
+
+  // Cash alone can still hit the absurd ceiling; swaps don't inflate the cash cap check the same way
+  if (fee > neg.hardCeil + 0.05 && !swaps.length) {
     return {
       status: "cap",
       message: `Слишком завышенная сумма. В реалиях рынка потолок около ${neg.hardCeil.toFixed(1)} млн.`,
     };
   }
-  if (fee < neg.marketValue * 0.95) {
+  if (fee > neg.hardCeil + swapCredit + 0.05) {
     return {
-      status: "insult",
-      message: `«${neg.sellerName}» даже не рассматривают предложение ниже рыночной оценки.`,
+      status: "cap",
+      message: `Даже с обменом клуб не возьмёт больше ~${(neg.hardCeil).toFixed(1)} млн кэшем.`,
     };
   }
-  if (fee + 0.05 < neg.minAccept) {
-    const gap = neg.minAccept - fee;
+
+  const floor = neg.marketValue * 0.95;
+  if (totalValue < floor) {
+    return {
+      status: "insult",
+      message: swaps.length
+        ? `«${neg.sellerName}» считают пакет (деньги + обмен) слишком слабым.`
+        : `«${neg.sellerName}» даже не рассматривают предложение ниже рыночной оценки.`,
+    };
+  }
+  if (totalValue + 0.05 < neg.minAccept) {
+    const gap = neg.minAccept - totalValue;
     const hint =
       gap >= neg.marketValue * 0.25
-        ? "Клуб явно хочет заметно больше."
+        ? "Клуб явно хочет заметно больше — добавьте денег или более сильного игрока в обмен."
         : gap >= neg.marketValue * 0.12
-          ? "Близко, но клуб просит ещё прибавить."
+          ? "Близко: чуть больше кэша или ещё один игрок в пакет."
           : "Почти договорились — не хватает совсем чуть-чуть.";
     return {
       status: "reject",
-      message: `«${neg.sellerName}» отклонили предложение на ${fee.toFixed(1)} млн. ${hint}`,
+      message: `«${neg.sellerName}» отклонили пакет на ~${totalValue.toFixed(1)} млн. ${hint}`,
     };
   }
+
+  const swapNote = swaps.length
+    ? ` + обмен (${swaps.map((p) => p.lastName).join(", ")})`
+    : "";
   return {
     status: "accept",
-    message: `«${neg.sellerName}» согласны отпустить игрока за ${fee.toFixed(1)} млн.`,
+    message: `«${neg.sellerName}» согласны: ${fee.toFixed(1)} млн${swapNote}.`,
   };
 }
 
@@ -296,7 +395,8 @@ export function buyPlayer(
   pack: WorldPack,
   save: CareerSave,
   playerId: string,
-  offeredFee?: number
+  offeredFee?: number,
+  swapPlayerIds: string[] = []
 ): TransferResult {
   if (!isTransferWindowOpen(save)) {
     return { ok: false, save, error: "Трансферное окно закрыто." };
@@ -306,8 +406,22 @@ export function buyPlayer(
     return { ok: false, save, error: "Игрок недоступен." };
   }
 
-  const fee = roundFee(offeredFee ?? neg.marketValue);
-  const verdict = evaluateBuyOffer(neg, fee);
+  const uniqueSwapIds = [...new Set(swapPlayerIds)].slice(0, MAX_SWAP_PLAYERS);
+  const swapPlayers = uniqueSwapIds
+    .map((id) => save.players.find((p) => p.id === id))
+    .filter((p): p is Player => !!p);
+
+  if (swapPlayers.length !== uniqueSwapIds.length) {
+    return { ok: false, save, error: "Один из игроков обмена не найден." };
+  }
+  for (const sp of swapPlayers) {
+    if (sp.clubId !== save.clubId || sp.loan) {
+      return { ok: false, save, error: "В обмен можно отдавать только своих игроков не в аренде." };
+    }
+  }
+
+  const fee = roundFee(offeredFee ?? Math.max(0, neg.marketValue - swapCreditForPlayers(swapPlayers)));
+  const verdict = evaluateBuyOffer(neg, fee, { pack, save, swapPlayers });
   if (verdict.status !== "accept") {
     return { ok: false, save, error: verdict.message };
   }
@@ -325,6 +439,11 @@ export function buyPlayer(
   }
 
   const fromClubId = player.clubId;
+  const ownSquadSize = next.players.filter((p) => p.clubId === next.clubId && !p.loan).length;
+  if (ownSquadSize - swapPlayers.length < 16) {
+    return { ok: false, save, error: "После обмена в составе останется слишком мало игроков." };
+  }
+
   ensureFinances(next, next.clubId);
   ensureFinances(next, fromClubId);
   if (next.clubFinances[next.clubId].budget < fee) {
@@ -338,6 +457,25 @@ export function buyPlayer(
   next.clubFinances[fromClubId].budget =
     Math.round((next.clubFinances[fromClubId].budget + fee) * 10) / 10;
 
+  // Move swap players to seller
+  const swapNames: string[] = [];
+  for (const id of uniqueSwapIds) {
+    const sp = next.players.find((p) => p.id === id);
+    if (!sp) continue;
+    sp.clubId = fromClubId;
+    delete sp.loan;
+    swapNames.push(`${sp.firstName} ${sp.lastName}`);
+    if (next.userTactics?.lineup?.includes(sp.id)) {
+      next.userTactics = {
+        ...next.userTactics,
+        lineup: next.userTactics.lineup.filter((x) => x !== sp.id),
+      };
+    }
+  }
+  if (next.userTactics && next.userTactics.lineup.length < 11) {
+    next.userTactics = defaultTactics(next.players, next.clubId, next.userTactics.formation);
+  }
+
   player.clubId = next.clubId;
   player.marketValue = recomputeMarketValue(player, next.playerStats?.[player.id] ?? null);
   delete player.loan;
@@ -346,6 +484,7 @@ export function buyPlayer(
     next.seasonStartMarketValues[player.id] = player.marketValue;
   }
 
+  const swapPart = swapNames.length ? `, обмен: ${swapNames.join(", ")}` : "";
   const overMv =
     fee > neg.marketValue + 0.05
       ? ` (оценка рынка ${neg.marketValue.toFixed(1)} млн)`
@@ -355,9 +494,9 @@ export function buyPlayer(
     date: next.currentDate,
     category: "transfer",
     headline: `${player.firstName} ${player.lastName} → «${toClub?.shortName ?? "клуб"}»`,
-    body: `Клуб приобрёл игрока за ${fee.toFixed(1)} млн у «${fromClub?.name ?? fromClubId}»${overMv}. Бюджет: ${next.clubFinances[next.clubId].budget.toFixed(1)} млн.`,
+    body: `Клуб приобрёл игрока за ${fee.toFixed(1)} млн у «${fromClub?.name ?? fromClubId}»${swapPart}${overMv}. Бюджет: ${next.clubFinances[next.clubId].budget.toFixed(1)} млн.`,
     relatedClubIds: [next.clubId, fromClubId],
-    relatedPlayerIds: [player.id],
+    relatedPlayerIds: [player.id, ...uniqueSwapIds],
   });
   recordDeal(next, {
     date: next.currentDate,
@@ -770,10 +909,45 @@ export function loanPlayer(
  * AI clubs that would take a user player on loan (need the position / would play him).
  * Fee is slightly attractive so loans find homes.
  */
+type LoanHostCache = {
+  squadByClub: Map<string, Player[]>;
+  xiByClub: Map<string, string[]>;
+  needsByClub: Map<string, ReturnType<typeof analyzeSquadNeeds>>;
+};
+
+function buildLoanHostCache(pack: WorldPack, save: CareerSave): LoanHostCache {
+  const squadByClub = new Map<string, Player[]>();
+  for (const p of save.players) {
+    if (!p.clubId) continue;
+    let list = squadByClub.get(p.clubId);
+    if (!list) {
+      list = [];
+      squadByClub.set(p.clubId, list);
+    }
+    list.push(p);
+  }
+  const xiByClub = new Map<string, string[]>();
+  const needsByClub = new Map<string, ReturnType<typeof analyzeSquadNeeds>>();
+  for (const club of pack.clubs) {
+    const hostSquad = squadByClub.get(club.id) ?? [];
+    if (hostSquad.length < 14) continue;
+    xiByClub.set(
+      club.id,
+      autoSelectLineup(save.players, club.id, "4-3-3", {
+        stats: save.playerStats,
+        suspensions: save.suspensions ?? {},
+      })
+    );
+    needsByClub.set(club.id, analyzeSquadNeeds(save.players, club.id));
+  }
+  return { squadByClub, xiByClub, needsByClub };
+}
+
 export function evaluateLoanInterest(
   pack: WorldPack,
   save: CareerSave,
-  playerId: string
+  playerId: string,
+  cache?: LoanHostCache
 ): {
   ok: boolean;
   fee: number;
@@ -791,7 +965,8 @@ export function evaluateLoanInterest(
   }
 
   const fee = roundFee(loanFeeForPlayer(player) * 0.85); // slight discount to stimulate demand
-  const squad = save.players.filter((p) => p.clubId === save.clubId && !p.loan);
+  const hostCache = cache ?? buildLoanHostCache(pack, save);
+  const squad = (hostCache.squadByClub.get(save.clubId) ?? []).filter((p) => !p.loan);
   if (squad.length <= 16) {
     return {
       ok: false,
@@ -802,36 +977,38 @@ export function evaluateLoanInterest(
   }
 
   const userXi = new Set(
-    autoSelectLineup(save.players, save.clubId, save.userTactics?.formation ?? "4-3-3", {
-      stats: save.playerStats,
-      suspensions: save.suspensions ?? {},
-    })
+    hostCache.xiByClub.get(save.clubId) ??
+      autoSelectLineup(save.players, save.clubId, save.userTactics?.formation ?? "4-3-3", {
+        stats: save.playerStats,
+        suspensions: save.suspensions ?? {},
+      })
   );
-  // Allow loaning starters if depth exists, but prefer bench — soft warn via wouldStart on host
 
   const pos = primaryPosition(player);
   const candidates: { id: string; score: number; wouldStart: boolean }[] = [];
+  const playersById = new Map(save.players.map((p) => [p.id, p]));
 
   for (const club of pack.clubs) {
     if (club.id === save.clubId) continue;
-    const hostSquad = save.players.filter((p) => p.clubId === club.id);
+    const hostSquad = hostCache.squadByClub.get(club.id) ?? [];
     if (hostSquad.length < 14) continue;
 
     const budget = clubBudget(save, club.id);
     if (budget < fee) continue;
 
-    const needs = analyzeSquadNeeds(save.players, club.id);
+    const needs = hostCache.needsByClub.get(club.id) ?? analyzeSquadNeeds(save.players, club.id);
     const want = new Set(topSquadNeedPositions(needs, 3));
     const needBoost = want.has(pos) ? 40 : 0;
 
-    const xi = autoSelectLineup(save.players, club.id, "4-3-3", {
-      stats: save.playerStats,
-      suspensions: save.suspensions ?? {},
-    });
-    // Simulate adding player: score if he'd displace someone or fill need
+    const xi =
+      hostCache.xiByClub.get(club.id) ??
+      autoSelectLineup(save.players, club.id, "4-3-3", {
+        stats: save.playerStats,
+        suspensions: save.suspensions ?? {},
+      });
     const samePos = hostSquad.filter((p) => primaryPosition(p) === pos);
     const weakestStarter = xi
-      .map((id) => save.players.find((p) => p.id === id))
+      .map((id) => playersById.get(id))
       .filter((p): p is Player => !!p && primaryPosition(p) === pos)
       .sort((a, b) => a.overall - b.overall)[0];
 
@@ -840,7 +1017,6 @@ export function evaluateLoanInterest(
       player.overall >= weakestStarter.overall - 1 ||
       (samePos.length < 2 && player.overall >= 68);
 
-    // Clubs don't take clear downgrades for the bench unless young with potential
     if (!wouldStart && !(player.age <= 23 && player.potential - player.overall >= 6)) {
       continue;
     }
@@ -848,7 +1024,7 @@ export function evaluateLoanInterest(
 
     let score = needBoost + (wouldStart ? 35 : 10) + (100 - Math.abs(player.overall - 72));
     if (player.age <= 22) score += 12;
-    if (userXi.has(player.id) && samePos.length >= 4) score += 5; // surplus starter OK
+    if (userXi.has(player.id) && samePos.length >= 4) score += 5;
     score += (club.reputation - 50) * 0.15;
     candidates.push({ id: club.id, score, wouldStart });
   }
@@ -878,9 +1054,10 @@ export function evaluateLoanInterest(
 }
 
 export function listLoanOutCandidates(pack: WorldPack, save: CareerSave): Player[] {
+  const cache = buildLoanHostCache(pack, save);
   return save.players
     .filter((p) => p.clubId === save.clubId && !p.loan)
-    .filter((p) => evaluateLoanInterest(pack, save, p.id).ok)
+    .filter((p) => evaluateLoanInterest(pack, save, p.id, cache).ok)
     .sort((a, b) => a.overall - b.overall || (a.marketValue ?? 0) - (b.marketValue ?? 0));
 }
 
