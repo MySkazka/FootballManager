@@ -23,6 +23,7 @@ import {
 } from "./liveMatch";
 import { generateWindowRumours, newsFromMatch, newsNationalTeam } from "./news";
 import {
+  computePlayerWage,
   generateWorldPlayers,
   hasLatinLetters,
   recomputeMarketValue,
@@ -253,6 +254,7 @@ function migratePlayer(raw: Partial<Player>, stats: CareerSave["playerStats"]): 
     height: raw.height ?? 0,
     weight: raw.weight ?? 0,
     marketValue: raw.marketValue ?? 0,
+    wage: typeof raw.wage === "number" && Number.isFinite(raw.wage) ? raw.wage : 0,
     portraitId: isValidPortraitId(raw.portraitId)
       ? raw.portraitId
       : portraitIdForPlayer(nationalityId, raw.id),
@@ -372,6 +374,18 @@ export function normalizeCareerSave(pack: WorldPack, raw: unknown): CareerSave |
   const withGuests = ensureMissingClubSquads(pack, players, recoverSeed);
   // Always copy — ensureMissingClubSquads may return the same array reference
   const allPlayers = [...withGuests];
+
+  // Backfill wages for old saves (and any zero placeholders from migrate).
+  const clubById = new Map(pack.clubs.map((c) => [c.id, c]));
+  const leagueByClub = new Map<string, string>();
+  for (const league of pack.leagues) {
+    for (const id of league.clubIds) leagueByClub.set(id, league.id);
+  }
+  for (const p of allPlayers) {
+    if (typeof p.wage === "number" && Number.isFinite(p.wage) && p.wage > 0) continue;
+    const club = p.clubId ? clubById.get(p.clubId) : undefined;
+    p.wage = computePlayerWage(p, club, p.clubId ? leagueByClub.get(p.clubId) : undefined);
+  }
 
   const season = typeof s.season === "string" ? s.season : pack.season;
   const uefa = ensureUefaState(pack, {

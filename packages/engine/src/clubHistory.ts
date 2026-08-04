@@ -50,14 +50,12 @@ const MOTTOS = [
   "Играть до конца",
 ];
 
-const HONOUR_POOL = [
-  "Чемпион страны",
-  "Обладатель кубка",
-  "Суперкубок",
-  "Победитель еврокубка",
-  "Финал еврокубка",
-  "Чемпион второй лиги",
-];
+/** Competitions that must be unique per year within a federation. */
+const FED_HONOURS = ["Чемпион страны", "Обладатель кубка", "Суперкубок"] as const;
+/** Continental trophies — unique per confederation per year. */
+const EURO_HONOURS = ["Победитель еврокубка", "Финал еврокубка"] as const;
+/** Lower-tier title — still unique per federation/year, aimed at mid clubs. */
+const SECOND_HONOUR = "Чемпион второй лиги";
 
 const LEGEND_NOTES = [
   "Символ эпохи и капитан команды",
@@ -83,6 +81,189 @@ function pickOpponents(pack: WorldPack, club: Club, rng: Rng, n: number): Club[]
   return shuffled.slice(0, n);
 }
 
+function confederationOf(pack: WorldPack, federationId: string): string {
+  return pack.federations.find((f) => f.id === federationId)?.confederation ?? "UEFA";
+}
+
+/** How many major domestic trophies a club "deserves" from reputation alone. */
+function domesticTrophyBudget(rep: number): number {
+  if (rep >= 92) return 6;
+  if (rep >= 88) return 5;
+  if (rep >= 84) return 4;
+  if (rep >= 80) return 3;
+  if (rep >= 76) return 2;
+  if (rep >= 72) return 1;
+  return 0;
+}
+
+function euroTrophyBudget(rep: number): number {
+  if (rep >= 93) return 3;
+  if (rep >= 88) return 2;
+  if (rep >= 84) return 1;
+  return 0;
+}
+
+function secondDivBudget(rep: number): number {
+  if (rep >= 80) return 0;
+  if (rep >= 68) return 1;
+  if (rep >= 60) return 1;
+  return 0;
+}
+
+type HonourSlot = { competition: string; year: number; clubId: string };
+
+/**
+ * Global honour ledger: at most one club per (competition scope, year).
+ * Top clubs soak up domestic/euro titles; mid/low clubs stay sparse or empty.
+ */
+function assignWorldHonours(pack: WorldPack, latestCompletedYear: number): Map<string, string[]> {
+  const rng = new Rng(hash(`world-honours:${pack.season}:${pack.clubs.length}`));
+  const byClub = new Map<string, string[]>();
+  for (const c of pack.clubs) byClub.set(c.id, []);
+
+  const earliest = Math.min(latestCompletedYear - 35, latestCompletedYear - 10);
+
+  const feds = [...new Set(pack.clubs.map((c) => c.federationId))];
+  for (const fed of feds) {
+    const clubs = pack.clubs
+      .filter((c) => c.federationId === fed && !c.guest)
+      .sort((a, b) => b.reputation - a.reputation);
+    if (!clubs.length) continue;
+
+    for (const competition of FED_HONOURS) {
+      const years = yearsRange(earliest, latestCompletedYear);
+      const usedYears = new Set<number>();
+      // Only top clubs compete for major domestic silverware
+      const topCut = competition === "Суперкубок" ? Math.min(4, clubs.length) : Math.min(6, clubs.length);
+      const pool = clubs.filter((c, i) => i < topCut || c.reputation >= 78);
+
+      for (const club of pool) {
+        let n = domesticTrophyBudget(club.reputation);
+        if (competition === "Суперкубок") n = Math.min(n, Math.max(0, n - 1));
+        if (competition === "Обладатель кубка") n = Math.max(0, Math.ceil(n * 0.85));
+        for (let i = 0; i < n; i++) {
+          const available = years.filter((y) => !usedYears.has(y));
+          if (!available.length) break;
+          const year = pickYear(available, rng, club.reputation);
+          usedYears.add(year);
+          pushHonour(byClub, club.id, competition, year);
+        }
+      }
+    }
+
+    // Second division — sparse, unique years, mid/low clubs only
+    const secondPool = clubs.filter((c) => c.reputation < 78);
+    const secondYears = yearsRange(earliest, latestCompletedYear);
+    const usedSecond = new Set<number>();
+    for (const club of [...secondPool].sort((a, b) => a.reputation - b.reputation)) {
+      const n = secondDivBudget(club.reputation);
+      for (let i = 0; i < n; i++) {
+        const available = secondYears.filter((y) => !usedSecond.has(y));
+        if (!available.length) break;
+        const year = pickYear(available, rng, 60);
+        usedSecond.add(year);
+        pushHonour(byClub, club.id, SECOND_HONOUR, year);
+      }
+    }
+  }
+
+  // Continental: unique per confederation + competition + year
+  const confeds = [...new Set(pack.federations.map((f) => f.confederation))];
+  for (const conf of confeds) {
+    const clubs = pack.clubs
+      .filter((c) => confederationOf(pack, c.federationId) === conf)
+      .sort((a, b) => b.reputation - a.reputation);
+    if (!clubs.length) continue;
+    const elite = clubs.filter((c) => c.reputation >= 84).slice(0, 12);
+    const pool = elite.length >= 3 ? elite : clubs.slice(0, Math.min(8, clubs.length));
+
+    for (const competition of EURO_HONOURS) {
+      const years = yearsRange(Math.max(earliest, latestCompletedYear - 28), latestCompletedYear);
+      const usedYears = new Set<number>();
+      for (const club of pool) {
+        let n = euroTrophyBudget(club.reputation);
+        if (competition === "Финал еврокубка") n = Math.min(4, n + (club.reputation >= 88 ? 1 : 0));
+        for (let i = 0; i < n; i++) {
+          const available = years.filter((y) => !usedYears.has(y));
+          if (!available.length) break;
+          const year = pickYear(available, rng, club.reputation);
+          usedYears.add(year);
+          pushHonour(byClub, club.id, competition, year);
+        }
+      }
+    }
+  }
+
+  // Sort each club's list by year desc for display
+  for (const [id, list] of byClub) {
+    list.sort((a, b) => {
+      const ya = Number(a.match(/\((\d{4})\)\s*$/)?.[1] ?? 0);
+      const yb = Number(b.match(/\((\d{4})\)\s*$/)?.[1] ?? 0);
+      return yb - ya || a.localeCompare(b);
+    });
+    byClub.set(id, list);
+  }
+
+  return byClub;
+}
+
+function yearsRange(from: number, to: number): number[] {
+  const out: number[] = [];
+  for (let y = from; y <= to; y++) out.push(y);
+  return out;
+}
+
+/** Prefer recent years for high-rep clubs. */
+function pickYear(available: number[], rng: Rng, reputation: number): number {
+  if (available.length === 1) return available[0]!;
+  const sorted = [...available].sort((a, b) => b - a);
+  const recentBias = reputation >= 88 ? 0.55 : reputation >= 80 ? 0.4 : 0.25;
+  if (rng.next() < recentBias) {
+    const top = sorted.slice(0, Math.max(3, Math.ceil(sorted.length * 0.35)));
+    return rng.pick(top);
+  }
+  return rng.pick(sorted);
+}
+
+function pushHonour(
+  byClub: Map<string, string[]>,
+  clubId: string,
+  competition: string,
+  year: number
+): void {
+  const list = byClub.get(clubId) ?? [];
+  list.push(`${competition} (${year})`);
+  byClub.set(clubId, list);
+}
+
+const honoursCache = new WeakMap<WorldPack, Map<string, string[]>>();
+
+function honoursForPack(pack: WorldPack, latestCompletedYear: number): Map<string, string[]> {
+  let cached = honoursCache.get(pack);
+  if (!cached) {
+    cached = assignWorldHonours(pack, latestCompletedYear);
+    honoursCache.set(pack, cached);
+  }
+  return cached;
+}
+
+/** Expose for tests — uniqueness / sparsity checks. */
+export function buildWorldHonoursLedger(
+  pack: WorldPack
+): { byClub: Map<string, string[]>; slots: HonourSlot[] } {
+  const seasonYear = parseInt(pack.season.slice(0, 4), 10) || 2025;
+  const latestCompletedYear = seasonYear - 1;
+  const byClub = assignWorldHonours(pack, latestCompletedYear);
+  const slots: HonourSlot[] = [];
+  for (const [clubId, list] of byClub) {
+    for (const h of list) {
+      const m = h.match(/^(.*) \((\d{4})\)$/);
+      if (m) slots.push({ competition: m[1]!, year: Number(m[2]), clubId });
+    }
+  }
+  return { byClub, slots };
+}
+
 /** Stable procedural lore for a club (legends + classic results). */
 export function buildClubHistory(pack: WorldPack, clubId: string): ClubHistory | null {
   const club = pack.clubs.find((c) => c.id === clubId);
@@ -93,15 +274,11 @@ export function buildClubHistory(pack: WorldPack, clubId: string): ClubHistory |
   /** Pack season e.g. 2025/26 is unfinished — trophies only through the prior year. */
   const latestCompletedYear = seasonYear - 1;
 
-  const honourCount = 2 + (club.reputation >= 85 ? 3 : club.reputation >= 75 ? 2 : 1);
-  const honours: string[] = [];
-  const honourBag = [...HONOUR_POOL].sort(() => rng.next() - 0.5);
-  for (let i = 0; i < honourCount && i < honourBag.length; i++) {
-    // Previous formula could reach seasonYear+15 (e.g. «Обладатель кубка (2035)»).
-    const raw = founded + 20 + rng.int(5, Math.max(6, seasonYear - founded - 5));
-    const year = Math.max(founded + 5, Math.min(raw, latestCompletedYear));
-    honours.push(`${honourBag[i]} (${year})`);
-  }
+  const worldHonours = honoursForPack(pack, latestCompletedYear);
+  const honours = (worldHonours.get(clubId) ?? []).filter((h) => {
+    const year = Number(h.match(/\((\d{4})\)\s*$/)?.[1] ?? 0);
+    return year >= founded + 5 && year <= latestCompletedYear;
+  });
 
   const positions: Position[] = ["GK", "DF", "MF", "FW", "MF", "DF"];
   const legends: ClubLegend[] = [];

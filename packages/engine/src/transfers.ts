@@ -9,8 +9,14 @@ import type {
   WindowTransferReport,
   WorldPack,
 } from "./types";
+import {
+  evaluatePlayerTransferWillingness,
+  evaluateWageAffordability,
+  playerSquadRole,
+  sellerAskDiscountForBuyerStrength,
+} from "./agency";
 import { primaryPosition } from "./labels";
-import { recomputeMarketValue } from "./players";
+import { computePlayerWage, recomputeMarketValue } from "./players";
 import { Rng } from "./rng";
 import { analyzeSquadNeeds, topSquadNeedPositions } from "./squadNeeds";
 import { autoSelectLineup, defaultTactics } from "./tactics";
@@ -57,6 +63,7 @@ export function buildTransferWindows(season: string): TransferWindow[] {
 export function seedClubFinances(pack: WorldPack): CareerSave["clubFinances"] {
   const out: CareerSave["clubFinances"] = {};
   for (const c of pack.clubs) {
+    // Transfer cash only — wages are seasonal costs tracked separately; keep budget healthy at start.
     const budget = c.budget ?? Math.round(c.reputation * 0.55 + 8);
     out[c.id] = { budget };
   }
@@ -251,17 +258,23 @@ export function getBuyNegotiation(
   const avgOvr =
     squad.reduce((s, p) => s + p.overall, 0) / Math.max(1, squad.length);
   const u = stableUnit(`${player.id}:${seller.id}:ask`);
+  const role = playerSquadRole(pack, save, player);
+  const prestigeDiscount = sellerAskDiscountForBuyerStrength(pack, save, buyer.id, seller.id);
 
   let markup = 1.08 + u * 0.12; // 8–20% base
   if (player.overall >= avgOvr + 4) markup += 0.12; // important starter
   if (player.overall >= avgOvr + 8) markup += 0.1; // star
+  if (role === "starter") markup += 0.08;
+  else if (role === "fringe") markup -= 0.06;
+  else if (role === "bench") markup -= 0.03;
   if (player.age <= 24 && player.potential - player.overall >= 8) markup += 0.1;
   if (samePos.length <= 3) markup += 0.12; // thin depth — reluctant
   if (samePos.length >= 6 && player.overall < avgOvr) markup -= 0.08; // surplus
   if (seller.reputation > buyer.reputation + 12) markup += 0.08;
   if (buyer.reputation > seller.reputation + 15) markup -= 0.06; // bigger club leverage
+  markup -= prestigeDiscount; // stronger buyer → seller less greedy
 
-  markup = Math.max(1.05, Math.min(1.55, markup));
+  markup = Math.max(1.02, Math.min(1.55, markup));
   const minAccept = roundFee(marketValue * markup);
   // ~1.85× is already a hefty premium in real transfers; don't go past ~2×
   const hardCeil = roundFee(Math.max(minAccept + 0.5, marketValue * 1.85));
@@ -291,7 +304,9 @@ export type OfferDecision =
   | { status: "accept"; message: string }
   | { status: "reject"; message: string }
   | { status: "insult"; message: string }
-  | { status: "cap"; message: string };
+  | { status: "cap"; message: string }
+  | { status: "player"; message: string }
+  | { status: "wage"; message: string };
 
 const MAX_SWAP_PLAYERS = 2;
 
@@ -361,6 +376,8 @@ export function evaluateBuyOffer(
     pack?: WorldPack;
     save?: CareerSave;
     swapPlayers?: Player[];
+    /** Buying club (defaults to save.clubId). */
+    buyerClubId?: string;
   }
 ): OfferDecision {
   const fee = roundFee(offer);
@@ -415,6 +432,35 @@ export function evaluateBuyOffer(
       status: "reject",
       message: `«${neg.sellerName}» отклонили пакет на ~${totalValue.toFixed(1)} млн. ${hint}`,
     };
+  }
+
+  // Clubs agree on fee — check wage fit and player willingness when context is available
+  if (opts?.pack && opts?.save) {
+    const buyerId = opts.buyerClubId ?? opts.save.clubId;
+    const player = opts.save.players.find((p) => p.id === neg.playerId);
+    if (player) {
+      const wageCheck = evaluateWageAffordability(
+        opts.pack,
+        opts.save,
+        buyerId,
+        player.wage ?? 0
+      );
+      if (!wageCheck.ok) {
+        return {
+          status: "wage",
+          message: wageCheck.message ?? "Зарплата игрока слишком высока для клуба.",
+        };
+      }
+      const will = evaluatePlayerTransferWillingness(
+        opts.pack,
+        opts.save,
+        player.id,
+        buyerId
+      );
+      if (!will.ok) {
+        return { status: "player", message: will.message };
+      }
+    }
   }
 
   const swapNote = swaps.length
@@ -502,6 +548,8 @@ export function buyPlayer(
     const swapFrom = next.clubId;
     sp.clubId = fromClubId;
     delete sp.loan;
+    const sellerLeague = pack.leagues.find((l) => l.clubIds.includes(fromClubId))?.id;
+    sp.wage = computePlayerWage(sp, fromClub, sellerLeague);
     appendCareerMove(sp, {
       date: next.currentDate,
       kind: "permanent",
@@ -525,6 +573,8 @@ export function buyPlayer(
 
   player.clubId = next.clubId;
   player.marketValue = recomputeMarketValue(player, next.playerStats?.[player.id] ?? null);
+  const buyerLeague = pack.leagues.find((l) => l.clubIds.includes(next.clubId))?.id;
+  player.wage = computePlayerWage(player, toClub, buyerLeague);
   delete player.loan;
   appendCareerMove(player, {
     date: next.currentDate,
@@ -604,6 +654,19 @@ export function sellPlayer(
     return { ok: false, save, error: "Покупатель не найден." };
   }
 
+  const will = evaluatePlayerTransferWillingness(pack, next, player.id, buyer.id);
+  if (!will.ok) {
+    return { ok: false, save, error: will.message };
+  }
+  const wageOk = evaluateWageAffordability(pack, next, buyer.id, player.wage ?? 0);
+  if (!wageOk.ok) {
+    return {
+      ok: false,
+      save,
+      error: wageOk.message ?? "Покупатель не потянет зарплату игрока.",
+    };
+  }
+
   ensureFinances(next, next.clubId);
   ensureFinances(next, buyer.id);
   if (next.clubFinances[buyer.id].budget < fee * 0.5) {
@@ -623,6 +686,8 @@ export function sellPlayer(
   const fromClubId = next.clubId;
   player.clubId = buyer.id;
   player.marketValue = recomputeMarketValue(player, next.playerStats?.[player.id] ?? null);
+  const buyerLeague = pack.leagues.find((l) => l.clubIds.includes(buyer.id))?.id;
+  player.wage = computePlayerWage(player, buyer, buyerLeague);
   appendCareerMove(player, {
     date: next.currentDate,
     kind: "permanent",
@@ -702,6 +767,7 @@ export function simulateAiTransfers(pack: WorldPack, save: CareerSave, rng: Rng)
   if (clubIds.length < 2) return;
 
   const dealCount = rng.chance(0.58) ? (rng.chance(0.28) ? 2 : 1) : 0;
+  const xiCache = { xiByClub: new Map<string, Set<string>>() };
   for (let i = 0; i < dealCount; i++) {
     const buyers = [...clubIds].sort(() => rng.next() - 0.5);
     let done = false;
@@ -735,6 +801,10 @@ export function simulateAiTransfers(pack: WorldPack, save: CareerSave, rng: Rng)
             if (fee > budget * 0.85 || fee < 0.8) return false;
             // Prefer mid-tier moves, not stars stripping
             if (p.overall >= 86) return false;
+            if (!evaluateWageAffordability(pack, save, buyerId, p.wage ?? 0).ok) return false;
+            if (!evaluatePlayerTransferWillingness(pack, save, p.id, buyerId, xiCache).ok) {
+              return false;
+            }
             return true;
           })
           .sort((a, b) => (a.marketValue ?? 0) - (b.marketValue ?? 0));
@@ -755,6 +825,8 @@ export function simulateAiTransfers(pack: WorldPack, save: CareerSave, rng: Rng)
         const toClub = pack.clubs.find((c) => c.id === buyerId);
         pick.clubId = buyerId;
         pick.marketValue = recomputeMarketValue(pick, save.playerStats?.[pick.id] ?? null);
+        const buyerLeague = pack.leagues.find((l) => l.clubIds.includes(buyerId))?.id;
+        pick.wage = computePlayerWage(pick, toClub, buyerLeague);
         delete pick.loan;
         appendCareerMove(pick, {
           date: save.currentDate,
@@ -850,6 +922,7 @@ export function generateIncomingTransferOffers(
 
   let created = 0;
   const buyersShuffled = [...buyerIds].sort(() => rng.next() - 0.5);
+  const xiCache = { xiByClub: new Map<string, Set<string>>() };
 
   for (const buyerId of buyersShuffled) {
     if (created >= bidCount) break;
@@ -872,6 +945,11 @@ export function generateIncomingTransferOffers(
         if (lineup.has(p.id) && p.overall >= 82 && budget < mv * 1.15) return false;
         const samePos = userSquad.filter((x) => primaryPosition(x) === pos).length;
         if (samePos < 2 && lineup.has(p.id)) return false;
+        if (!evaluateWageAffordability(pack, save, buyerId, p.wage ?? 0).ok) return false;
+        // Starters won't join a clear step down — don't even bid
+        if (!evaluatePlayerTransferWillingness(pack, save, p.id, buyerId, xiCache).ok) {
+          return false;
+        }
         return true;
       })
       .sort((a, b) => {
@@ -885,9 +963,11 @@ export function generateIncomingTransferOffers(
     if (!pick) continue;
 
     const mv = Math.max(1, pick.marketValue ?? 1);
-    // Fee around MV, capped by budget; richer clubs stretch a bit
-    const stretch = 0.88 + rng.next() * 0.32 + (budget > mv * 2 ? 0.08 : 0);
-    let fee = roundFee(Math.min(budget * 0.92, mv * stretch));
+    // Fee around MV, capped by budget; richer / stronger clubs get softer asks
+    const prestige = sellerAskDiscountForBuyerStrength(pack, save, buyerId, save.clubId);
+    const stretch =
+      0.88 + rng.next() * 0.32 + (budget > mv * 2 ? 0.08 : 0) - prestige * 0.9;
+    let fee = roundFee(Math.min(budget * 0.92, mv * Math.max(0.78, stretch)));
     if (fee < mv * 0.75) fee = roundFee(Math.min(budget * 0.85, mv * 0.85));
     if (fee < 0.8 || fee > budget) continue;
 

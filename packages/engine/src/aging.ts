@@ -1,5 +1,6 @@
 import { computeOverall, primaryPosition } from "./labels";
 import {
+  computePlayerWage,
   recomputeMarketValue,
   rollBody,
   rollCyrillicName,
@@ -283,10 +284,12 @@ export function generateAcademyProspects(
       height,
       weight,
       marketValue: 0,
+      wage: 0,
       portraitId: portraits[i] ?? portraitIdForPlayer(nationalityId, id),
       retirementAge: defaultRetirementAge({ id, positions: [position], preferredRole }),
     };
     draft.marketValue = recomputeMarketValue(draft, null);
+    draft.wage = computePlayerWage(draft, club, pack.leagues.find((l) => l.clubIds.includes(clubId))?.id);
     out.push(draft);
   }
   return out;

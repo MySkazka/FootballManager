@@ -1,4 +1,5 @@
 import type {
+  Club,
   Player,
   PlayerAttributes,
   PlayerSeasonStats,
@@ -497,6 +498,57 @@ export function recomputeMarketValue(
   return Math.max(0.1, Math.round(value * 10) / 10);
 }
 
+/**
+ * Seasonal wage in abstract millions — scales with overall / age / club rep / league wealth.
+ * Tuned so a full squad wage bill stays well below typical transfer budgets (no start-of-career debt).
+ */
+export function computePlayerWage(
+  player: Pick<Player, "overall" | "age" | "potential">,
+  club?: Pick<Club, "reputation"> | null,
+  leagueId?: string | null
+): number {
+  const ovr = player.overall;
+  const age = player.age;
+  const pot = player.potential;
+  // Soft curve: 60 OVR ≈ 0.08, 75 ≈ 0.28, 85 ≈ 0.7, 92 ≈ 1.4
+  let wage = Math.pow(Math.max(45, ovr) / 55, 3.1) * 0.22;
+
+  if (age <= 20) wage *= 0.72;
+  else if (age <= 23) wage *= 0.88;
+  else if (age <= 29) wage *= 1.08;
+  else if (age <= 32) wage *= 1.0;
+  else if (age <= 34) wage *= 0.82;
+  else wage *= 0.55;
+
+  if (pot - ovr >= 8 && age <= 23) wage *= 1.08;
+
+  const rep = club?.reputation ?? 70;
+  wage *= 0.72 + rep / 220;
+
+  const leagueWealth: Record<string, number> = {
+    epl: 1.28,
+    laliga: 1.12,
+    bundesliga: 1.08,
+    seriea: 1.05,
+    ligue1: 0.98,
+    rpl: 0.78,
+  };
+  wage *= leagueId ? leagueWealth[leagueId] ?? 0.9 : 0.9;
+
+  // Cap individual wages so even galacticos don't alone sink a mid budget (~50–60)
+  wage = Math.min(wage, 2.8 + Math.max(0, rep - 85) * 0.04);
+  return Math.max(0.02, Math.round(wage * 100) / 100);
+}
+
+/** Total seasonal wage bill for a club (abstract millions). */
+export function clubWageBill(players: Player[], clubId: string): number {
+  return Math.round(
+    players
+      .filter((p) => p.clubId === clubId && !p.loan)
+      .reduce((s, p) => s + Math.max(0, p.wage ?? 0), 0) * 100
+  ) / 100;
+}
+
 class UniqueNames {
   /** Per-federation uniqueness so foreign leagues don't starve Russian pools. */
   private usedByFed = new Map<string, Set<string>>();
@@ -577,7 +629,8 @@ export function generateSquad(
     const potential = Math.min(95, overall + rng.int(0, 12));
     const { height, weight } = rollBody(position, rng);
     const { roles, preferredRole, preferredFoot } = rollRolesAndFoot(position, rng);
-    const draft: Omit<Player, "marketValue"> & { marketValue?: number } = {
+    const leagueId = pack.leagues.find((l) => l.clubIds.includes(clubId))?.id;
+    const draft: Omit<Player, "marketValue" | "wage"> & { marketValue?: number; wage?: number } = {
       id: `${clubId}-p${i + 1}`,
       firstName,
       lastName,
@@ -599,6 +652,7 @@ export function generateSquad(
     players.push({
       ...draft,
       marketValue: recomputeMarketValue(draft, null),
+      wage: computePlayerWage(draft, club, leagueId),
     });
   }
   return players;
@@ -643,4 +697,14 @@ export function refreshMarketValues(
     if (ids && !ids.has(p.id)) continue;
     p.marketValue = recomputeMarketValue(p, stats?.[p.id] ?? null);
   }
+}
+
+/** Ensure wage is set (migration / academy). Mutates player. */
+export function ensurePlayerWage(
+  player: Player,
+  club?: Pick<Club, "reputation"> | null,
+  leagueId?: string | null
+): void {
+  if (typeof player.wage === "number" && Number.isFinite(player.wage) && player.wage > 0) return;
+  player.wage = computePlayerWage(player, club, leagueId);
 }

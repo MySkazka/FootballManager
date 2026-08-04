@@ -18,6 +18,9 @@ export {
   ensureMissingClubSquads,
   hasLatinLetters,
   recomputeMarketValue,
+  computePlayerWage,
+  clubWageBill,
+  ensurePlayerWage,
   refreshMarketValues,
   rollBody,
   rollCyrillicName,
@@ -127,6 +130,7 @@ export {
   clubDisplayName,
   clubTitleLines,
   formatMarketValue,
+  formatWage,
   keyAttributes,
   topStrengths,
   computeOverall,
@@ -210,11 +214,22 @@ export {
 export type { ValueHistoryPoint } from "./valueHistory";
 export {
   buildClubHistory,
+  buildWorldHonoursLedger,
   careerLegendsForClub,
   clubPlayedMatches,
   upcomingClubEuroFixtures,
 } from "./clubHistory";
 export type { ClubHistory, ClubLegend, ClassicMatch, PlayedMatchRow } from "./clubHistory";
+export {
+  clubStrengthScore,
+  clubStrengthDelta,
+  playerSquadRole,
+  isImportantStarter,
+  evaluatePlayerTransferWillingness,
+  evaluateWageAffordability,
+  sellerAskDiscountForBuyerStrength,
+} from "./agency";
+export type { SquadRole } from "./agency";
 export {
   rollMatchAtmosphere,
   clubStadiumCapacity,

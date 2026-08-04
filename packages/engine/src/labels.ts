@@ -215,6 +215,17 @@ export function formatMarketValue(value: number | undefined | null): string {
   return `${text} млн`;
 }
 
+/** Seasonal wage in abstract millions (зарплата). */
+export function formatWage(value: number | undefined | null): string {
+  const n = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  const rounded = Math.round(n * 100) / 100;
+  const text =
+    Number.isInteger(rounded) || Math.abs(rounded * 10 - Math.round(rounded * 10)) < 1e-9
+      ? (Math.round(rounded * 10) / 10).toFixed(1).replace(".", ",")
+      : rounded.toFixed(2).replace(".", ",");
+  return `${text} млн/сез`;
+}
+
 export function keyAttributes(player: Player): (keyof PlayerAttributes)[] {
   switch (primaryPosition(player)) {
     case "GK":

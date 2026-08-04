@@ -34,6 +34,7 @@ import {
   evaluateBuyOffer,
   finishUserMatch,
   formatMarketValue,
+  formatWage,
   FOOT_LABEL,
   formatAttendance,
   attendanceFillPct,
@@ -215,7 +216,7 @@ export default function App() {
     feedback?: string;
     feedbackKind?: "info" | "reject" | "accept" | "error";
     swapIds: string[];
-    lastVerdict?: "reject" | "insult" | "cap" | "accept";
+    lastVerdict?: "reject" | "insult" | "cap" | "accept" | "player" | "wage";
   }>(null);
 
   const startBuyDeal = (playerId: string) => {
@@ -2828,6 +2829,9 @@ function PlayerScreen({
             Нога: {FOOT_LABEL[player.preferredFoot] ?? "Правая"} · {player.height} см ·{" "}
             {player.weight} кг · {formatMarketValue(player.marketValue)}
           </Text>
+          <Text style={styles.sub}>
+            Зарплата: {formatWage(player.wage)}
+          </Text>
           {club ? (
             <Text style={styles.sub}>
               {club.name} · {club.city}
@@ -3048,14 +3052,14 @@ function BuyNegotiationModal({
   swapIds: string[];
   feedback?: string;
   feedbackKind?: "info" | "reject" | "accept" | "error";
-  lastVerdict?: "reject" | "insult" | "cap" | "accept";
+  lastVerdict?: "reject" | "insult" | "cap" | "accept" | "player" | "wage";
   onChangeOffer: (
     offer: number,
     feedback?: string,
     swapIds?: string[],
     meta?: {
       feedbackKind?: "info" | "reject" | "accept" | "error";
-      lastVerdict?: "reject" | "insult" | "cap" | "accept";
+      lastVerdict?: "reject" | "insult" | "cap" | "accept" | "player" | "wage";
     }
   ) => void;
   onClose: () => void;
@@ -3095,7 +3099,11 @@ function BuyNegotiationModal({
   const atCeil = offer >= neg.hardCeil - 0.05;
   const packageValue = Math.round((offer + swapCredit) * 10) / 10;
   const rejected =
-    lastVerdict === "reject" || lastVerdict === "insult" || lastVerdict === "cap";
+    lastVerdict === "reject" ||
+    lastVerdict === "insult" ||
+    lastVerdict === "cap" ||
+    lastVerdict === "player" ||
+    lastVerdict === "wage";
 
   const toggleSwap = (id: string) => {
     let next = swapIds.includes(id) ? swapIds.filter((x) => x !== id) : [...swapIds, id];
@@ -3141,7 +3149,11 @@ function BuyNegotiationModal({
           ? "Клуб оскорблён предложением"
           : verdict.status === "cap"
             ? "Слишком завышенная сумма"
-            : "Клуб отклонил предложение";
+            : verdict.status === "player"
+              ? "Игрок отказался от перехода"
+              : verdict.status === "wage"
+                ? "Проблема с зарплатой"
+                : "Клуб отклонил предложение";
       onChangeOffer(
         offer,
         `${label}.\n${verdict.message}\n\nПовысьте кэш (+5% / +10% / +20%) или усильте обмен, затем предложите снова.`,
@@ -3223,6 +3235,7 @@ function BuyNegotiationModal({
               {playerNameWithAge(player)}
               {from ? ` («${from.name}»)` : ""}
               {"\n"}Рынок: {formatMarketValue(neg.marketValue)} · потолок кэша ~{formatMarketValue(neg.hardCeil)}
+              {"\n"}Зарплата: {formatWage(player.wage)}
               {"\n"}Ваше предложение (кэш): {formatMarketValue(offer)}
               {swapPlayers.length
                 ? `\nОбмен: ${swapPlayers.map((p) => p.lastName).join(", ")} (~${formatMarketValue(swapCredit)})`

@@ -119,6 +119,8 @@ export interface Player {
   weight: number;
   /** Market value in abstract millions */
   marketValue: number;
+  /** Seasonal wage in abstract millions (same unit as budget / market value). */
+  wage: number;
   /** Index into the player portrait pack (stable appearance). */
   portraitId: number;
   /** Age at which the player retires after the season tick (age becomes >= this). */
