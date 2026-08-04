@@ -1,44 +1,101 @@
 /** Skin-tone buckets for portrait assets player-01 … player-N (0-based). */
 export type PortraitTone = "light" | "medium" | "dark";
 
-export const PORTRAIT_COUNT = 28;
+export const PORTRAIT_COUNT = 100;
 
 /** Bump when portrait pack or assignment rules change — triggers respread on save load. */
-export const PORTRAIT_SCHEMA = 3;
+export const PORTRAIT_SCHEMA = 4;
 
 /**
  * Tone of each player-0N.png (0-based index).
- * Keep in sync with apps/mobile assets player-01…player-28.
+ * Keep in sync with apps/mobile assets player-01…player-100.
  */
 export const PORTRAIT_TONES: PortraitTone[] = [
-  "light", // 01 fair smile
-  "dark", // 02
-  "light", // 03 blonde
-  "medium", // 04 olive
-  "light", // 05 ginger freckles
-  "dark", // 06 bald
-  "medium", // 07 tan + stubble
-  "medium", // 08 tan ponytail
-  "light", // 09 ginger
-  "medium", // 10 olive buzz
-  "light", // 11 curly + beard
-  "dark", // 12 fade
-  "light", // 13 older thinning
-  "dark", // 14 afro
-  "light", // 15 long straight hair
-  "dark", // 16 dreads
-  "medium", // 17 mustache
-  "light", // 18 platinum buzz
-  "medium", // 19 wavy latino
-  "dark", // 20 bald goatee
-  "light", // 21 messy blonde
-  "medium", // 22 thick brows
-  "light", // 23 ginger beard
-  "dark", // 24 cornrows
-  "medium", // 25 slicked
-  "light", // 26 mullet
-  "medium", // 27 bald + beard
-  "medium", // 28 east-asian short
+  // 01–10 (original pack)
+  "light", "dark", "light", "medium", "light", "dark", "medium", "medium", "light", "medium",
+  // 11–20
+  "light", "dark", "light", "dark", "light", "dark", "medium", "light", "medium", "dark",
+  // 21–28
+  "light", "medium", "light", "dark", "medium", "light", "medium", "medium",
+  // 29–40
+  "light", // 29 platinum
+  "dark", // 30 braided
+  "light", // 31 copper curly
+  "medium", // 32 mediterranean
+  "medium", // 33 ash-gray asian
+  "medium", // 34 bleached buzz latino
+  "dark", // 35 pink tips
+  "light", // 36 long wavy
+  "medium", // 37 bald mustache
+  "light", // 38 blue highlights
+  "dark", // 39 honey afro
+  "light", // 40 silver older
+  // 41–50
+  "light", // 41 green hair
+  "dark", // 42 cornrows gold
+  "light", // 43 ginger pony
+  "medium", // 44 purple hair
+  "light", // 45 white buzz beard
+  "dark", // 46 twists
+  "light", // 47 strawberry
+  "dark", // 48 high-top
+  "light", // 49 man-bun
+  "medium", // 50 teal hair
+  // 51–60
+  "light", // 51 undercut
+  "dark", // 52 salt-pepper
+  "light", // 53 neon orange
+  "dark", // 54 dreads
+  "medium", // 55 bowl cut
+  "dark", // 56 blonde mohawk
+  "light", // 57 sandy
+  "medium", // 58 curly black
+  "light", // 59 platinum mullet
+  "dark", // 60 coils
+  // 61–70
+  "light", // 61 auburn
+  "medium", // 62 white streak
+  "medium", // 63 permed asian
+  "dark", // 64 bald gray beard
+  "light", // 65 pink curly
+  "medium", // 66 pompadour
+  "light", // 67 dirty blonde
+  "dark", // 68 locs amber
+  "medium", // 69 chestnut
+  "light", // 70 raven long
+  // 71–80
+  "light", // 71 red tips
+  "dark", // 72 fade curly
+  "light", // 73 mutton chops
+  "medium", // 74 braids back
+  "light", // 75 yellow hair
+  "dark", // 76 gray temples
+  "light", // 77 ash-brown
+  "medium", // 78 double bun
+  "light", // 79 copper buzz
+  "dark", // 80 wavy black
+  // 81–90
+  "light", // 81 violet long
+  "dark", // 82 blonde patch
+  "light", // 83 mint tips
+  "dark", // 84 bald ebony
+  "light", // 85 honey curtain
+  "medium", // 86 buzz beard
+  "light", // 87 blue underlight
+  "dark", // 88 copper beads
+  "light", // 89 silver-white
+  "medium", // 90 wavy tan
+  // 91–100
+  "light", // 91 flat-top
+  "dark", // 92 burgundy
+  "light", // 93 blonde bangs
+  "medium", // 94 horseshoe
+  "light", // 95 orange curly
+  "dark", // 96 cornrow fade
+  "light", // 97 chocolate brown
+  "dark", // 98 gray streak
+  "light", // 99 neon blue
+  "medium", // 100 curly beard
 ];
 
 if (PORTRAIT_TONES.length !== PORTRAIT_COUNT) {
@@ -119,7 +176,6 @@ export function assignSquadPortraits(nationalityIds: string[], rng: MiniRng): nu
     const weights = toneWeights(nat);
     const tone = pickTone(weights, rng.next());
 
-    // 1) Unused faces in preferred / neighboring tones
     let chosen: number | null = null;
     for (const t of toneNeighbors(tone)) {
       const pool = TONE_IDS[t].filter((id) => !used.has(id));
@@ -129,13 +185,11 @@ export function assignSquadPortraits(nationalityIds: string[], rng: MiniRng): nu
       }
     }
 
-    // 2) Any unused face left in the pack
     if (chosen == null) {
       const leftover = [...Array(PORTRAIT_COUNT).keys()].filter((id) => !used.has(id));
       if (leftover.length) chosen = rng.pick(leftover);
     }
 
-    // 3) Squad larger than pack — reuse least-used, prefer tone
     if (chosen == null) {
       let best: number[] = [];
       let bestCount = Infinity;
@@ -145,9 +199,7 @@ export function assignSquadPortraits(nationalityIds: string[], rng: MiniRng): nu
           if (c < bestCount) {
             bestCount = c;
             best = [id];
-          } else if (c === bestCount) {
-            best.push(id);
-          }
+          } else if (c === bestCount) best.push(id);
         }
       }
       if (!best.length) {
