@@ -27,6 +27,9 @@ export {
 export {
   PORTRAIT_COUNT,
   PORTRAIT_SCHEMA,
+  PLAYER_PORTRAIT_BLOCKLIST,
+  PLAYER_PORTRAIT_ALLOWLIST,
+  STAFF_EXEC_PORTRAIT_IDS,
   portraitIdForPlayer,
   assignSquadPortraits,
   isValidPortraitId,
@@ -69,6 +72,12 @@ export {
   buyPlayer,
   sellPlayer,
   simulateAiTransfers,
+  generateIncomingTransferOffers,
+  listPendingIncomingOffers,
+  acceptIncomingOffer,
+  rejectIncomingOffer,
+  rejectIncomingOffers,
+  expireStaleIncomingOffers,
   getBuyNegotiation,
   evaluateBuyOffer,
   raiseBuyOffer,
@@ -89,7 +98,11 @@ export {
   isBigTransfer,
 } from "./transfers";
 export type { BuyNegotiation, OfferDecision } from "./transfers";
-export type { TransferDealRecord, WindowTransferReport } from "./types";
+export type {
+  TransferDealRecord,
+  IncomingTransferOffer,
+  WindowTransferReport,
+} from "./types";
 export { analyzeSquadNeeds, topSquadNeedPositions, squadNeedsSummary } from "./squadNeeds";
 export type { SquadNeed } from "./squadNeeds";
 export {

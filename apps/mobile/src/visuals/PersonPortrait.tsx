@@ -1,6 +1,6 @@
 import { Asset } from "expo-asset";
 import { Image, View } from "react-native";
-import { portraitIdForPlayer } from "@fm/engine";
+import { isValidPortraitId, portraitIdForPlayer, STAFF_EXEC_PORTRAIT_IDS } from "@fm/engine";
 
 function hash(s: string): number {
   let h = 2166136261;
@@ -117,10 +117,43 @@ const PLAYER_PORTRAITS = [
   require("../../assets/portraits/player-100.png"),
 ] as const;
 
-const COACH_PORTRAITS = [require("../../assets/portraits/coach-01.png")] as const;
-const PRESIDENT_PORTRAITS = [require("../../assets/portraits/staff-01.png")] as const;
-const JOURNALIST_PORTRAITS = [require("../../assets/portraits/staff-02.png")] as const;
-const SD_PORTRAITS = [require("../../assets/portraits/staff-03.png")] as const;
+const COACH_PORTRAITS = [
+  require("../../assets/portraits/coach-01.png"),
+  require("../../assets/portraits/staff-03.png"),
+  // Mature faces reserved from the player pack (blocked for players).
+  ...STAFF_EXEC_PORTRAIT_IDS.map((id) => PLAYER_PORTRAITS[id]),
+] as const;
+
+/** Presidents: formal staff art + dedicated mature range (unique per club via seed). */
+const PRESIDENT_PORTRAITS = [
+  require("../../assets/portraits/staff-01.png"),
+  require("../../assets/portraits/coach-01.png"),
+  ...STAFF_EXEC_PORTRAIT_IDS.map((id) => PLAYER_PORTRAITS[id]),
+  PLAYER_PORTRAITS[36], // bald mustache — executive look
+  PLAYER_PORTRAITS[19],
+  PLAYER_PORTRAITS[6],
+  PLAYER_PORTRAITS[84],
+] as const;
+
+const JOURNALIST_PORTRAITS = [
+  require("../../assets/portraits/staff-02.png"),
+  require("../../assets/portraits/staff-01.png"),
+  PLAYER_PORTRAITS[51],
+  PLAYER_PORTRAITS[75],
+  PLAYER_PORTRAITS[10],
+  PLAYER_PORTRAITS[22],
+] as const;
+
+/** Sporting directors: separate mix / offset so they rarely collide with presidents. */
+const SD_PORTRAITS = [
+  require("../../assets/portraits/staff-03.png"),
+  require("../../assets/portraits/staff-01.png"),
+  ...[...STAFF_EXEC_PORTRAIT_IDS].reverse().map((id) => PLAYER_PORTRAITS[id]),
+  PLAYER_PORTRAITS[45],
+  PLAYER_PORTRAITS[72],
+  PLAYER_PORTRAITS[31],
+  PLAYER_PORTRAITS[3],
+] as const;
 
 let portraitsPreloaded = false;
 
@@ -186,10 +219,9 @@ export function PersonPortrait({
   if (kind !== "player") {
     source = staffSource(kind, portraitSeed);
   } else {
-    const idx =
-      typeof portraitId === "number" && portraitId >= 0 && portraitId < PLAYER_PORTRAITS.length
-        ? portraitId
-        : portraitIdForPlayer(nationalityId ?? "RUS", seed);
+    const idx = isValidPortraitId(portraitId)
+      ? portraitId
+      : portraitIdForPlayer(nationalityId ?? "RUS", seed);
     source = PLAYER_PORTRAITS[idx % PLAYER_PORTRAITS.length];
   }
 

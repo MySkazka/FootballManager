@@ -4,7 +4,30 @@ export type PortraitTone = "light" | "medium" | "dark";
 export const PORTRAIT_COUNT = 100;
 
 /** Bump when portrait pack or assignment rules change — triggers respread on save load. */
-export const PORTRAIT_SCHEMA = 4;
+export const PORTRAIT_SCHEMA = 5;
+
+/**
+ * Portrait IDs blocked for players (0-based → player-(id+1).png).
+ * Female-looking or elderly / non-footballer faces — remapped on save load.
+ * These IDs remain available for staff / executive avatars in the mobile UI.
+ */
+export const PLAYER_PORTRAIT_BLOCKLIST: readonly number[] = [
+  // Elderly / clearly past playing age
+  39, // player-40 silver older
+  51, // player-52 salt-pepper
+  63, // player-64 bald gray beard
+  75, // player-76 gray temples
+  93, // player-94 horseshoe bald
+  97, // player-98 gray streak
+  // Female-looking / strongly feminine presentation
+  77, // player-78 double bun
+  80, // player-81 violet long
+];
+
+const BLOCKED = new Set(PLAYER_PORTRAIT_BLOCKLIST);
+
+/** Mature / executive faces (subset of blocklist) for president & SD pools. */
+export const STAFF_EXEC_PORTRAIT_IDS: readonly number[] = [39, 51, 63, 75, 93, 97];
 
 /**
  * Tone of each player-0N.png (0-based index).
@@ -102,10 +125,15 @@ if (PORTRAIT_TONES.length !== PORTRAIT_COUNT) {
   throw new Error(`PORTRAIT_TONES length ${PORTRAIT_TONES.length} != PORTRAIT_COUNT ${PORTRAIT_COUNT}`);
 }
 
+/** Young/male footballer faces only (blocklist excluded). */
+export const PLAYER_PORTRAIT_ALLOWLIST: readonly number[] = [
+  ...Array.from({ length: PORTRAIT_COUNT }, (_, i) => i).filter((id) => !BLOCKED.has(id)),
+];
+
 const TONE_IDS: Record<PortraitTone, number[]> = {
-  light: PORTRAIT_TONES.map((t, i) => (t === "light" ? i : -1)).filter((i) => i >= 0),
-  medium: PORTRAIT_TONES.map((t, i) => (t === "medium" ? i : -1)).filter((i) => i >= 0),
-  dark: PORTRAIT_TONES.map((t, i) => (t === "dark" ? i : -1)).filter((i) => i >= 0),
+  light: PORTRAIT_TONES.map((t, i) => (t === "light" && !BLOCKED.has(i) ? i : -1)).filter((i) => i >= 0),
+  medium: PORTRAIT_TONES.map((t, i) => (t === "medium" && !BLOCKED.has(i) ? i : -1)).filter((i) => i >= 0),
+  dark: PORTRAIT_TONES.map((t, i) => (t === "dark" && !BLOCKED.has(i) ? i : -1)).filter((i) => i >= 0),
 };
 
 /** Typical appearance mix by federation (priors for matching names ↔ faces). */
@@ -165,12 +193,13 @@ function toneNeighbors(tone: PortraitTone): PortraitTone[] {
 /**
  * Assign portrait indices for a squad.
  * Uniqueness within the squad is preferred over perfect tone match:
- * use every face once before any face is reused.
+ * use every allowlisted face once before any face is reused.
  */
 export function assignSquadPortraits(nationalityIds: string[], rng: MiniRng): number[] {
+  const allow = PLAYER_PORTRAIT_ALLOWLIST;
   const used = new Set<number>();
   const useCount = new Map<number, number>();
-  for (let i = 0; i < PORTRAIT_COUNT; i++) useCount.set(i, 0);
+  for (const id of allow) useCount.set(id, 0);
 
   return nationalityIds.map((nat) => {
     const weights = toneWeights(nat);
@@ -186,7 +215,7 @@ export function assignSquadPortraits(nationalityIds: string[], rng: MiniRng): nu
     }
 
     if (chosen == null) {
-      const leftover = [...Array(PORTRAIT_COUNT).keys()].filter((id) => !used.has(id));
+      const leftover = allow.filter((id) => !used.has(id));
       if (leftover.length) chosen = rng.pick(leftover);
     }
 
@@ -203,7 +232,7 @@ export function assignSquadPortraits(nationalityIds: string[], rng: MiniRng): nu
         }
       }
       if (!best.length) {
-        for (let id = 0; id < PORTRAIT_COUNT; id++) {
+        for (const id of allow) {
           const c = useCount.get(id) ?? 0;
           if (c < bestCount) {
             bestCount = c;
@@ -211,18 +240,24 @@ export function assignSquadPortraits(nationalityIds: string[], rng: MiniRng): nu
           } else if (c === bestCount) best.push(id);
         }
       }
-      chosen = rng.pick(best);
+      chosen = rng.pick(best.length ? best : [...allow]);
     }
 
     used.add(chosen);
     useCount.set(chosen, (useCount.get(chosen) ?? 0) + 1);
-    if (used.size >= PORTRAIT_COUNT) used.clear();
+    if (used.size >= allow.length) used.clear();
     return chosen;
   });
 }
 
 export function isValidPortraitId(id: unknown): id is number {
-  return typeof id === "number" && Number.isInteger(id) && id >= 0 && id < PORTRAIT_COUNT;
+  return (
+    typeof id === "number" &&
+    Number.isInteger(id) &&
+    id >= 0 &&
+    id < PORTRAIT_COUNT &&
+    !BLOCKED.has(id)
+  );
 }
 
 export function portraitIdForPlayer(nationalityId: string, seed: string): number {
@@ -234,5 +269,8 @@ export function portraitIdForPlayer(nationalityId: string, seed: string): number
   const roll = ((h >>> 0) % 1000) / 1000;
   const tone = pickTone(toneWeights(nationalityId), roll);
   const pool = TONE_IDS[tone];
+  if (!pool.length) {
+    return PLAYER_PORTRAIT_ALLOWLIST[Math.abs(h) % PLAYER_PORTRAIT_ALLOWLIST.length];
+  }
   return pool[Math.abs(h) % pool.length];
 }

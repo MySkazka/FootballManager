@@ -41,6 +41,8 @@ import { defaultTactics, autoSelectLineup, optimalTactics } from "./tactics";
 import {
   buildTransferWindows,
   detectClosedTransferWindow,
+  expireStaleIncomingOffers,
+  generateIncomingTransferOffers,
   isTransferWindowOpen,
   resolveExpiredLoans,
   seedClubFinances,
@@ -168,6 +170,8 @@ export function createCareer(
     transferWindows: buildTransferWindows(pack.season),
     suspensions: {},
     pendingAcademy: [],
+    transferLog: [],
+    incomingTransferOffers: [],
     portraitSchema: PORTRAIT_SCHEMA,
     nationalitySchema: NATIONALITY_SCHEMA,
     seasonStartMarketValues: {},
@@ -452,6 +456,17 @@ export function normalizeCareerSave(pack: WorldPack, raw: unknown): CareerSave |
     seasonResolved: s.seasonResolved === true,
     pendingAcademy: Array.isArray(s.pendingAcademy) ? (s.pendingAcademy as Player[]) : [],
     transferLog: Array.isArray(s.transferLog) ? s.transferLog : [],
+    incomingTransferOffers: Array.isArray(s.incomingTransferOffers)
+      ? s.incomingTransferOffers.filter(
+          (o) =>
+            o &&
+            typeof o === "object" &&
+            typeof (o as { id?: unknown }).id === "string" &&
+            typeof (o as { playerId?: unknown }).playerId === "string" &&
+            typeof (o as { buyingClubId?: unknown }).buyingClubId === "string" &&
+            typeof (o as { fee?: unknown }).fee === "number"
+        )
+      : [],
     pendingWindowReport: s.pendingWindowReport ?? null,
     portraitSchema: PORTRAIT_SCHEMA,
     nationalitySchema: NATIONALITY_SCHEMA,
@@ -626,9 +641,12 @@ export function advanceDay(pack: WorldPack, save: CareerSave, seed: number): Day
 
   if (isTransferWindowOpen(next)) {
     simulateAiTransfers(pack, next, rng);
+    generateIncomingTransferOffers(pack, next, rng);
     next.news.unshift(
       ...generateWindowRumours(pack, next.players, next.clubId, next.currentDate, next.news, rng)
     );
+  } else {
+    expireStaleIncomingOffers(next);
   }
 
   if (userFixture) {

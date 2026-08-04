@@ -1,6 +1,7 @@
 import type {
   CareerSave,
   Club,
+  IncomingTransferOffer,
   Player,
   TransferDealRecord,
   TransferResult,
@@ -570,7 +571,8 @@ export function sellPlayer(
   pack: WorldPack,
   save: CareerSave,
   playerId: string,
-  toClubId?: string
+  toClubId?: string,
+  offeredFee?: number
 ): TransferResult {
   if (!isTransferWindowOpen(save)) {
     return { ok: false, save, error: "Трансферное окно закрыто." };
@@ -589,7 +591,11 @@ export function sellPlayer(
     return { ok: false, save, error: "Слишком мало игроков в составе." };
   }
 
-  const fee = player.marketValue ?? 0;
+  const mv = player.marketValue ?? 0;
+  const fee =
+    offeredFee != null && Number.isFinite(offeredFee) && offeredFee > 0
+      ? roundFee(offeredFee)
+      : mv;
   const buyer =
     (toClubId && pack.clubs.find((c) => c.id === toClubId)) ||
     pickAiBuyer(pack, next, player);
@@ -656,6 +662,15 @@ export function sellPlayer(
     fee,
   });
 
+  // Drop competing / obsolete offers for this player
+  if (next.incomingTransferOffers?.length) {
+    next.incomingTransferOffers = next.incomingTransferOffers.map((o) =>
+      o.playerId === playerId && o.status === "pending"
+        ? { ...o, status: "expired" as const }
+        : o
+    );
+  }
+
   return { ok: true, save: next, fee, budgetBefore, budgetAfter };
 }
 
@@ -676,7 +691,7 @@ function pickAiBuyer(pack: WorldPack, save: CareerSave, player: Player): Club | 
 
 /**
  * AI clubs deal among themselves during open windows (never touches user club).
- * Sparse: usually 0–1 deal per day, rarely 2.
+ * Sparse but visible: often 0–2 deals per day so the market feed stays alive.
  */
 export function simulateAiTransfers(pack: WorldPack, save: CareerSave, rng: Rng): void {
   if (!isTransferWindowOpen(save)) return;
@@ -686,15 +701,18 @@ export function simulateAiTransfers(pack: WorldPack, save: CareerSave, rng: Rng)
   );
   if (clubIds.length < 2) return;
 
-  const dealCount = rng.chance(0.38) ? (rng.chance(0.22) ? 2 : 1) : 0;
+  const dealCount = rng.chance(0.58) ? (rng.chance(0.28) ? 2 : 1) : 0;
   for (let i = 0; i < dealCount; i++) {
     const buyers = [...clubIds].sort(() => rng.next() - 0.5);
     let done = false;
     for (const buyerId of buyers) {
       if (done) break;
       const needs = analyzeSquadNeeds(save.players, buyerId);
-      const want = topSquadNeedPositions(needs, 2);
-      if (!want.length) continue;
+      let want = topSquadNeedPositions(needs, 2);
+      // Balanced squads still shop: pick a random line to reinforce.
+      if (!want.length) {
+        want = [rng.pick(["FW", "MF", "DF", "GK"] as const)];
+      }
       const budget = clubBudget(save, buyerId);
       if (budget < 1.5) continue;
 
@@ -707,6 +725,7 @@ export function simulateAiTransfers(pack: WorldPack, save: CareerSave, rng: Rng)
 
         const candidates = sellerSquad
           .filter((p) => {
+            if (p.loan) return false;
             const pos = primaryPosition(p);
             if (!want.includes(pos)) return false;
             if (sellerWeak.has(pos)) return false;
@@ -769,6 +788,185 @@ export function simulateAiTransfers(pack: WorldPack, save: CareerSave, rng: Rng)
       }
     }
   }
+}
+
+function ensureIncomingOffers(save: CareerSave): IncomingTransferOffer[] {
+  if (!save.incomingTransferOffers) save.incomingTransferOffers = [];
+  return save.incomingTransferOffers;
+}
+
+/** Expire pending bids when the window closes or the player left. */
+export function expireStaleIncomingOffers(save: CareerSave): void {
+  const offers = ensureIncomingOffers(save);
+  const open = isTransferWindowOpen(save);
+  const window = getActiveTransferWindow(save);
+  for (const o of offers) {
+    if (o.status !== "pending") continue;
+    const player = save.players.find((p) => p.id === o.playerId);
+    if (!open || !player || player.clubId !== save.clubId) {
+      o.status = "expired";
+      continue;
+    }
+    if (window && o.windowId !== window.id) o.status = "expired";
+  }
+  // Keep recent history short
+  save.incomingTransferOffers = offers
+    .filter((o) => o.status === "pending" || o.date >= save.currentDate.slice(0, 7))
+    .slice(0, 40);
+}
+
+/**
+ * Other clubs send buy requests for the user's players during the open window.
+ * Multiple clubs may bid for the same player; user picks one or refuses all.
+ */
+export function generateIncomingTransferOffers(
+  pack: WorldPack,
+  save: CareerSave,
+  rng: Rng
+): void {
+  if (!isTransferWindowOpen(save)) return;
+  expireStaleIncomingOffers(save);
+  const window = getActiveTransferWindow(save);
+  if (!window) return;
+
+  // Sparse: usually 0, sometimes 1–2 new bids per day
+  if (!rng.chance(0.42)) return;
+  const bidCount = rng.chance(0.3) ? 2 : 1;
+
+  const league = pack.leagues.find((l) => l.clubIds.includes(save.clubId));
+  const buyerIds = (league?.clubIds ?? pack.clubs.map((c) => c.id)).filter(
+    (id) => id !== save.clubId
+  );
+  if (!buyerIds.length) return;
+
+  const userSquad = save.players.filter(
+    (p) => p.clubId === save.clubId && !p.loan && (p.marketValue ?? 0) >= 1.2
+  );
+  if (userSquad.length <= 16) return;
+
+  const lineup = new Set(save.userTactics?.lineup ?? []);
+  const pending = ensureIncomingOffers(save).filter((o) => o.status === "pending");
+  const pendingKeys = new Set(pending.map((o) => `${o.playerId}:${o.buyingClubId}`));
+
+  let created = 0;
+  const buyersShuffled = [...buyerIds].sort(() => rng.next() - 0.5);
+
+  for (const buyerId of buyersShuffled) {
+    if (created >= bidCount) break;
+    const needs = analyzeSquadNeeds(save.players, buyerId);
+    const want = new Set(topSquadNeedPositions(needs, 3));
+    const budget = clubBudget(save, buyerId);
+    if (budget < 2) continue;
+
+    const candidates = userSquad
+      .filter((p) => {
+        if (pendingKeys.has(`${p.id}:${buyerId}`)) return false;
+        const pos = primaryPosition(p);
+        const mv = p.marketValue ?? 0;
+        if (mv > budget * 0.9) return false;
+        // Prefer need positions; otherwise bid on bench / surplus.
+        const onNeed = want.size === 0 || want.has(pos);
+        const onBench = !lineup.has(p.id);
+        if (!onNeed && !onBench && !rng.chance(0.22)) return false;
+        // Don't constantly bid for irreplaceable stars unless rich
+        if (lineup.has(p.id) && p.overall >= 82 && budget < mv * 1.15) return false;
+        const samePos = userSquad.filter((x) => primaryPosition(x) === pos).length;
+        if (samePos < 2 && lineup.has(p.id)) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const aNeed = want.has(primaryPosition(a)) ? 0 : 1;
+        const bNeed = want.has(primaryPosition(b)) ? 0 : 1;
+        if (aNeed !== bNeed) return aNeed - bNeed;
+        return (b.marketValue ?? 0) - (a.marketValue ?? 0);
+      });
+
+    const pick = candidates[0];
+    if (!pick) continue;
+
+    const mv = Math.max(1, pick.marketValue ?? 1);
+    // Fee around MV, capped by budget; richer clubs stretch a bit
+    const stretch = 0.88 + rng.next() * 0.32 + (budget > mv * 2 ? 0.08 : 0);
+    let fee = roundFee(Math.min(budget * 0.92, mv * stretch));
+    if (fee < mv * 0.75) fee = roundFee(Math.min(budget * 0.85, mv * 0.85));
+    if (fee < 0.8 || fee > budget) continue;
+
+    const offer: IncomingTransferOffer = {
+      id: `inoffer-${pick.id}-${buyerId}-${save.currentDate}-${rng.int(1, 9999)}`,
+      date: save.currentDate,
+      windowId: window.id,
+      playerId: pick.id,
+      playerName: `${pick.firstName} ${pick.lastName}`,
+      buyingClubId: buyerId,
+      fee,
+      status: "pending",
+    };
+    pendingKeys.add(`${pick.id}:${buyerId}`);
+    save.incomingTransferOffers = [offer, ...ensureIncomingOffers(save)].slice(0, 40);
+    created++;
+  }
+}
+
+export function listPendingIncomingOffers(save: CareerSave): IncomingTransferOffer[] {
+  expireStaleIncomingOffers(save);
+  return (save.incomingTransferOffers ?? []).filter((o) => o.status === "pending");
+}
+
+export function acceptIncomingOffer(
+  pack: WorldPack,
+  save: CareerSave,
+  offerId: string
+): TransferResult {
+  if (!isTransferWindowOpen(save)) {
+    return { ok: false, save, error: "Трансферное окно закрыто." };
+  }
+  const offer = (save.incomingTransferOffers ?? []).find(
+    (o) => o.id === offerId && o.status === "pending"
+  );
+  if (!offer) {
+    return { ok: false, save, error: "Предложение уже неактуально." };
+  }
+  const buyer = pack.clubs.find((c) => c.id === offer.buyingClubId);
+  if (!buyer) {
+    return { ok: false, save, error: "Клуб-покупатель не найден." };
+  }
+  const result = sellPlayer(pack, save, offer.playerId, offer.buyingClubId, offer.fee);
+  if (!result.ok) return result;
+  const next = result.save;
+  if (next.incomingTransferOffers) {
+    next.incomingTransferOffers = next.incomingTransferOffers.map((o) => {
+      if (o.id === offerId) return { ...o, status: "accepted" as const };
+      if (o.playerId === offer.playerId && o.status === "pending") {
+        return { ...o, status: "expired" as const };
+      }
+      return o;
+    });
+  }
+  return { ...result, save: next };
+}
+
+export function rejectIncomingOffer(save: CareerSave, offerId: string): CareerSave {
+  const next = structuredClone(save) as CareerSave;
+  if (!next.incomingTransferOffers) return next;
+  next.incomingTransferOffers = next.incomingTransferOffers.map((o) =>
+    o.id === offerId && o.status === "pending" ? { ...o, status: "rejected" as const } : o
+  );
+  return next;
+}
+
+/** Reject every pending bid for a player (or all pending bids if playerId omitted). */
+export function rejectIncomingOffers(
+  save: CareerSave,
+  playerId?: string
+): CareerSave {
+  const next = structuredClone(save) as CareerSave;
+  if (!next.incomingTransferOffers) return next;
+  next.incomingTransferOffers = next.incomingTransferOffers.map((o) => {
+    if (o.status !== "pending") return o;
+    if (playerId && o.playerId !== playerId) return o;
+    return { ...o, status: "rejected" as const };
+  });
+  return next;
 }
 
 /** Approximate end of season / loan return date for current career. */

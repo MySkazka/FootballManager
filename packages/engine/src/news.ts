@@ -1,26 +1,93 @@
+import { quoteFingerprint } from "./matchReactions";
+import { rollCyrillicName } from "./players";
 import type { Club, Fixture, MatchResult, NewsItem, Player } from "./types";
 import { Rng } from "./rng";
 
+/** Varied presidential tones: dry, witty, blunt, diplomatic, media-savvy, visionary. */
 const PRESIDENT_QUOTES = [
-  "Клуб должен бороться выше, чем позволяют таблицы.",
-  "Трансферное окно будет точечным, без шоу ради шоу.",
-  "Мы строим проект на годы, а не на один всплеск.",
+  "Таблицы лгут чаще, чем журналисты. Наша планка — выше цифр на сегодня.",
+  "Трансферное окно — не ярмарка тщеславия. Покупаем смысл, а не шум.",
+  "Проект строится на годах, а не на одном красивом заголовке в понедельник.",
+  "Если хотите шоу — купите билет в цирк. Мы продаём результат и характер.",
+  "Я не комментирую слухи. Комментирую бюджет, контракты и лицо клуба.",
+  "Кричать про «революцию» легко. Сложнее неделю за неделей не ломать курс.",
+  "Мы уважаем болельщика достаточно, чтобы не кормить его сказками про чудеса.",
+  "Рынок горячий — голова должна быть холодной. Иначе сгорим вместе с деньгами.",
+  "Поражение — это данные. Паника — это выбор. Мы выбираем данные.",
+  "Состав — не коллекция звёзд. Это оркестр. Дирижёр отвечает за партитуру.",
+  "Дипломатия хороша в кулуарах. На поле нужна злость и дисциплина.",
+  "Медиа любят драму. Мы любим три очка. Интересы редко совпадают.",
+  "Долгий контракт важнее громкого имени. Имя уезжает — система остаётся.",
+  "Я сухой в интервью, потому что мокрые обещания дорого обходятся клубу.",
+  "Если кто-то ждёт «вау-трансфер» ради лайков — вы не туда пришли.",
+  "Стратегия не меняется от одного матча. Меняется тон тех, кто не читал план.",
+  "Бюджет — это мораль в цифрах. Тратим так, чтобы стыдно не было через год.",
+  "Клуб — не мой личный блог. Это институт. Я отвечаю за институт.",
+  "Острые вопросы принимаю. Глупые — тоже, но короче.",
+  "Мы не прячемся от критики. Прячемся только от импульсивных покупок.",
 ];
 
+/** Sporting-director tones: blunt scouting, contract poker, wry market talk. */
 const SD_QUOTES = [
-  "Скаутинг уже смотрит усиление линии атаки.",
-  "Контракты ключевых игроков под контролем.",
+  "Скаутинг уже копает атаку. Не списки из Twitter — живые минуты и профиль.",
+  "Ключевые контракты под контролем. Паника агентов нас не развлекает.",
+  "Рынок шумит громче, чем наши звонки. Так и должно быть.",
+  "Ищем не «имя», а решение проблемы на конкретной позиции.",
+  "Если игрок дороже пользы — это не трансфер, это сувенир.",
+  "Аренда, опцион, зарплата — три кнопки. Нажимаем только две из трёх.",
+  "Я не торгуюсь на камеру. Камера любит цену, клуб любит условия.",
+  "Глубина состава важнее одного красивого подписания в последний день.",
+  "Смотрим характер так же жёстко, как смотрим удар и пас.",
+  "Окно короткое. Ошибки длинные. Поэтому темп спокойный, а фильтр жёсткий.",
+  "Есть интерес к нам — отлично. Есть интерес от нас — тишина до бумаги.",
+  "Молодые с потолком важнее возрастных с резюме. Резюме не бегает.",
+  "Скаут сказал «может». Я спрашиваю «когда и против кого».",
+  "Контракт — это обещание в обе стороны. Мы умеем читать мелкий шрифт.",
+  "Не каждый слух — работа. Иногда это просто кто-то хочет внимания.",
+  "Линия атаки — приоритет. Но не ценой дыры в центре, которую потом заклеим лентой.",
 ];
 
 const RUMOURS = [
   "источники связывают {player} («{from}») с переходом в «{club}»",
   "агент {player} («{from}») якобы зондирует интерес со стороны «{club}»",
   "в раздевалке «{from}» поговаривают о возможном уходе {player}",
+  "в окружении {player} («{from}») не исключают переговоры с «{club}»",
+  "инсайдеры намекают: «{club}» уже прощупывали цену на {player} из «{from}»",
 ];
 
-const PRES_NAMES = ["Александр Морозов", "Виктор Лебедев", "Дмитрий Соколов"];
-const SD_NAMES = ["Роман Киселёв", "Евгений Макаров", "Никита Фролов"];
-const JOURNALISTS = ["Илья Репортёров", "Анна Спортивная", "Максим Инсайдов"];
+const JOURNALISTS = ["Илья Репортёров", "Анна Спортивная", "Максим Инсайдов", "Кирилл Хроникёр", "Ольга Пресс"];
+
+const FED_FROM_CLUB_PREFIX: Record<string, string> = {
+  rus: "RUS",
+  eng: "ENG",
+  esp: "ESP",
+  ger: "GER",
+  ita: "ITA",
+  fra: "FRA",
+};
+
+type QuoteBag = { used: Set<string>; rng: Rng };
+
+function federationForClub(clubId: string): string {
+  const prefix = clubId.split("-")[0]?.toLowerCase() ?? "";
+  return FED_FROM_CLUB_PREFIX[prefix] ?? "RUS";
+}
+
+function staffName(role: "president" | "sporting_director", clubId: string): string {
+  const { firstName, lastName } = rollCyrillicName(
+    federationForClub(clubId),
+    `${role}:${clubId}`
+  );
+  return `${firstName} ${lastName}`;
+}
+
+function pickFresh(pool: string[], bag: QuoteBag): string {
+  const free = pool.filter((q) => !bag.used.has(quoteFingerprint(q)));
+  if (!free.length) return bag.rng.pick(pool);
+  const chosen = bag.rng.pick(free);
+  bag.used.add(quoteFingerprint(chosen));
+  return chosen;
+}
 
 function playerName(p: Player): string {
   return `${p.firstName} ${p.lastName}`;
@@ -47,6 +114,7 @@ export function newsFromMatch(
   rng: Rng
 ): NewsItem[] {
   const items: NewsItem[] = [];
+  const bag: QuoteBag = { used: new Set(), rng };
   const score = `${result.homeGoals}:${result.awayGoals}`;
   items.push({
     id: `news-match-${fixture.id}`,
@@ -59,7 +127,7 @@ export function newsFromMatch(
 
   if (rng.chance(0.15)) {
     const club = rng.pick([home, away]);
-    const quote = rng.pick(PRESIDENT_QUOTES);
+    const quote = pickFresh(PRESIDENT_QUOTES, bag);
     items.push({
       id: `news-pres-${fixture.id}`,
       date: fixture.date,
@@ -67,20 +135,25 @@ export function newsFromMatch(
       headline: `Президент «${club.shortName}»: «${quote}»`,
       body: `Руководство ${club.name} вышло с публичным комментарием.`,
       relatedClubIds: [club.id],
-      speaker: { role: "president", name: rng.pick(PRES_NAMES), clubId: club.id },
+      speaker: { role: "president", name: staffName("president", club.id), clubId: club.id },
     });
   }
 
   if (rng.chance(0.12)) {
     const club = rng.pick([home, away]);
+    const quote = pickFresh(SD_QUOTES, bag);
     items.push({
       id: `news-sd-${fixture.id}`,
       date: fixture.date,
       category: "insight",
-      headline: `Спортдир «${club.shortName}»: «${rng.pick(SD_QUOTES)}»`,
+      headline: `Спортдир «${club.shortName}»: «${quote}»`,
       body: `В клубе комментируют кадровые планы.`,
       relatedClubIds: [club.id],
-      speaker: { role: "sporting_director", name: rng.pick(SD_NAMES), clubId: club.id },
+      speaker: {
+        role: "sporting_director",
+        name: staffName("sporting_director", club.id),
+        clubId: club.id,
+      },
     });
   }
 

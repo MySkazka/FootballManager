@@ -352,6 +352,19 @@ export interface TransferDealRecord {
   fee: number;
 }
 
+/** AI club bid for a user-owned player (persisted while pending). */
+export interface IncomingTransferOffer {
+  id: string;
+  date: string;
+  windowId: string;
+  playerId: string;
+  playerName: string;
+  /** Club that wants to buy. */
+  buyingClubId: string;
+  fee: number;
+  status: "pending" | "accepted" | "rejected" | "expired";
+}
+
 export interface WindowTransferReport {
   windowId: string;
   label: string;
@@ -381,6 +394,8 @@ export interface CareerSave {
   suspensions: Record<string, number>;
   /** Log of deals in the current season (for window reports). */
   transferLog?: TransferDealRecord[];
+  /** Pending / recent buy offers for the user's players. */
+  incomingTransferOffers?: IncomingTransferOffer[];
   /** Shown once after a transfer window closes. */
   pendingWindowReport?: WindowTransferReport | null;
   /** Market value at the start of the current championship (per player). */

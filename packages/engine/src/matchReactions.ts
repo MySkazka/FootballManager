@@ -40,6 +40,26 @@ type SideSnap = {
 
 type QuoteBag = { used: Set<string>; rng: Rng };
 
+/** Collapse venue/men wording so home/away variants of the same template share a key. */
+export function quoteFingerprint(text: string): string {
+  return text
+    .replace(/в гостях/gi, "§VENUE")
+    .replace(/дома/gi, "§VENUE")
+    .replace(/вдесятером/g, "§MEN")
+    .replace(/вдевятером/g, "§MEN")
+    .replace(/в меньшинстве/g, "§MEN");
+}
+
+/** Distinct lines when a story-branch pool is exhausted for this match. */
+const FALLBACK_QUOTES = [
+  `Матч ещё гудит в ушах — эмоции сырые, выводы завтра. Сейчас важно не наговорить лишнего и сохранить холодную голову.`,
+  `Счёт есть, разбор будет жёстче слов. Не хочу повторять очевидное: работаем дальше, без театра и без нытья.`,
+  `Такие вечера учат быстрее лекций. Детали оставлю на видеоразбор — сегодня достаточно честно признать, что день получился непростым.`,
+  `Футбол снова напомнил, кто тут главный. Мы ответим на поле, а не красивыми фразами в микрофон.`,
+  `Пусть останется коротко: выложились, ошибались, сделаем выводы. Сезон длинный — этот матч не последняя страница.`,
+  `Говорить много смысла нет. Ноги ещё помнят каждый метр, голова уже строит следующий план. Идём дальше.`,
+];
+
 function outcome(gf: number, ga: number): Outcome {
   if (gf > ga) return "win";
   if (gf < ga) return "loss";
@@ -68,11 +88,21 @@ function menLabel(reds: number): string {
   return "в меньшинстве";
 }
 
-/** Pick a quote that has not been used yet in this match. */
+/**
+ * Pick a quote unused in this match (by fingerprint, so venue/men variants count as one).
+ * If the branch pool is exhausted, use a fallback line; if those are gone too, return "".
+ */
 function pickFresh(pool: string[], bag: QuoteBag): string {
-  const free = pool.filter((q) => !bag.used.has(q));
-  const chosen = bag.rng.pick(free.length ? free : pool);
-  bag.used.add(chosen);
+  const free = pool.filter((q) => !bag.used.has(quoteFingerprint(q)));
+  let chosen: string | undefined;
+  if (free.length) {
+    chosen = bag.rng.pick(free);
+  } else {
+    const fallbackFree = FALLBACK_QUOTES.filter((q) => !bag.used.has(quoteFingerprint(q)));
+    if (!fallbackFree.length) return "";
+    chosen = bag.rng.pick(fallbackFree);
+  }
+  bag.used.add(quoteFingerprint(chosen));
   return chosen;
 }
 
@@ -721,30 +751,38 @@ export function buildMatchReactions(
       (e) => e.type === "card" && e.detail !== "red" && e.playerId === p.id
     );
     const red = events.some((e) => e.type === "card" && e.detail === "red" && e.playerId === p.id);
+    const quote = playerQuote(side, ratings[p.id] ?? 6.5, goalsScored, yellow, red, bag);
+    if (!quote) return;
     reactions.push({
       role: "player",
       name: playerDisplayName(p),
       clubId: side.clubId,
       playerId: p.id,
-      quote: playerQuote(side, ratings[p.id] ?? 6.5, goalsScored, yellow, red, bag),
+      quote,
     });
   };
 
   addPlayer(homeSide, homeLine);
   addPlayer(awaySide, awayLine);
 
-  reactions.push({
-    role: "coach",
-    name: coachNameForClub(homeClubId),
-    clubId: homeClubId,
-    quote: coachQuote(homeSide, bag),
-  });
-  reactions.push({
-    role: "coach",
-    name: coachNameForClub(awayClubId),
-    clubId: awayClubId,
-    quote: coachQuote(awaySide, bag),
-  });
+  const homeCoachQuote = coachQuote(homeSide, bag);
+  if (homeCoachQuote) {
+    reactions.push({
+      role: "coach",
+      name: coachNameForClub(homeClubId),
+      clubId: homeClubId,
+      quote: homeCoachQuote,
+    });
+  }
+  const awayCoachQuote = coachQuote(awaySide, bag);
+  if (awayCoachQuote) {
+    reactions.push({
+      role: "coach",
+      name: coachNameForClub(awayClubId),
+      clubId: awayClubId,
+      quote: awayCoachQuote,
+    });
+  }
 
   return reactions;
 }

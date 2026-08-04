@@ -31,6 +31,7 @@ import {
   seasonValueDelta,
   createCareer,
   acceptAcademyProspect,
+  acceptIncomingOffer,
   evaluateBuyOffer,
   finishUserMatch,
   formatMarketValue,
@@ -56,7 +57,10 @@ import {
   isTransferWindowOpen,
   listEuroCalendar,
   listLeagueCalendar,
+  listPendingIncomingOffers,
   rejectAcademyProspect,
+  rejectIncomingOffer,
+  rejectIncomingOffers,
   clearAcademyPending,
   clearWindowReport,
   keyAttributes,
@@ -117,6 +121,7 @@ import {
   type Position,
   type SeasonAwards,
   type WindowTransferReport,
+  type IncomingTransferOffer,
   type TeamTactics,
   type WorldPack,
 } from "@fm/engine";
@@ -2890,7 +2895,11 @@ function NewsCard({ item, pack, save }: { item: NewsItem; pack: WorldPack; save:
       <View style={styles.newsTop}>
         {item.speaker ? (
           <PersonPortrait
-            seed={item.speaker.name + (item.speaker.playerId ?? "")}
+            seed={
+              item.speaker.clubId
+                ? `${item.speaker.role}:${item.speaker.clubId}`
+                : item.speaker.name + (item.speaker.playerId ?? "")
+            }
             size={40}
             kind={speakerKind(item.speaker.role)}
             jersey={speakerClub?.colors[0]}
@@ -3323,12 +3332,27 @@ function TransfersScreen({
 
   const windowDeals = useMemo(() => {
     const log = save.transferLog ?? [];
-    if (!active) return log.slice(0, 24);
+    if (!active) return log.slice(0, 40);
     return log.filter(
       (d) =>
         d.windowId === active.id || (d.date >= active.from && d.date <= active.to)
     );
   }, [save.transferLog, active]);
+
+  const incomingOffers = useMemo(
+    () => (open ? listPendingIncomingOffers(save) : []),
+    [save, open]
+  );
+
+  const offersByPlayer = useMemo(() => {
+    const m = new Map<string, IncomingTransferOffer[]>();
+    for (const o of incomingOffers) {
+      const list = m.get(o.playerId) ?? [];
+      list.push(o);
+      m.set(o.playerId, list);
+    }
+    return m;
+  }, [incomingOffers]);
 
   const targets = useMemo(
     () =>
@@ -3510,6 +3534,65 @@ function TransfersScreen({
     });
   };
 
+  const doAcceptOffer = (offer: IncomingTransferOffer) => {
+    const buyer = clubsById.get(offer.buyingClubId);
+    const rivals = (offersByPlayer.get(offer.playerId) ?? []).filter(
+      (o) => o.id !== offer.id
+    );
+    const rivalNote = rivals.length
+      ? `\n\nДругие предложения по этому игроку будут отклонены (${rivals.length}).`
+      : "";
+    setDialog({
+      title: "Принять предложение?",
+      body: `${offer.playerName}\nПокупатель: «${buyer?.name ?? offer.buyingClubId}»\nСумма: ${formatMarketValue(offer.fee)}${rivalNote}`,
+      confirmLabel: "Продать",
+      destructive: true,
+      onConfirm: () => {
+        const result = acceptIncomingOffer(pack, save, offer.id);
+        setDialog(null);
+        if (!result.ok) {
+          setDialog({
+            title: "Предложение",
+            body: result.error ?? "Не удалось принять",
+          });
+          return;
+        }
+        onSave(result.save);
+      },
+    });
+  };
+
+  const doRejectOffer = (offerId: string) => {
+    onSave(rejectIncomingOffer(save, offerId));
+  };
+
+  const doRejectAllForPlayer = (playerId: string) => {
+    const p = save.players.find((x) => x.id === playerId);
+    setDialog({
+      title: "Отклонить все?",
+      body: `Отклонить все предложения по игроку ${p ? playerNameWithAge(p) : playerId}?`,
+      confirmLabel: "Отклонить все",
+      destructive: true,
+      onConfirm: () => {
+        setDialog(null);
+        onSave(rejectIncomingOffers(save, playerId));
+      },
+    });
+  };
+
+  const doRejectAllOffers = () => {
+    setDialog({
+      title: "Отклонить все предложения?",
+      body: "Все входящие заявки клубов будут отклонены.",
+      confirmLabel: "Отклонить все",
+      destructive: true,
+      onConfirm: () => {
+        setDialog(null);
+        onSave(rejectIncomingOffers(save));
+      },
+    });
+  };
+
   const posChips: { id: Position | "all"; label: string }[] = [
     { id: "all", label: "Все" },
     { id: "GK", label: POSITION_LABEL.GK },
@@ -3555,17 +3638,84 @@ function TransfersScreen({
         contentContainerStyle={{ paddingBottom: 24 }}
         ListHeaderComponent={
           <>
+            {open && incomingOffers.length > 0 ? (
+              <View style={styles.needsBox}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <Text style={styles.needsTitle}>
+                    Входящие предложения · {incomingOffers.length}
+                  </Text>
+                  <Pressable onPress={doRejectAllOffers}>
+                    <Text style={styles.dealBig}>отклонить все</Text>
+                  </Pressable>
+                </View>
+                <Text style={styles.needsLead}>
+                  Клубы хотят купить ваших игроков. Если заявок несколько на одного — выберите покупателя или откажите всем.
+                </Text>
+                {[...offersByPlayer.entries()].map(([playerId, offers]) => {
+                  const p = save.players.find((x) => x.id === playerId);
+                  return (
+                    <View key={playerId} style={{ marginTop: 10 }}>
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                        <Text style={styles.clubName}>
+                          {p ? playerNameWithAge(p) : offers[0]?.playerName}
+                          {offers.length > 1 ? ` · ${offers.length} клуба` : ""}
+                        </Text>
+                        {offers.length > 1 ? (
+                          <Pressable onPress={() => doRejectAllForPlayer(playerId)}>
+                            <Text style={styles.dealBig}>отказать всем</Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+                      {offers.map((o) => {
+                        const buyer = clubsById.get(o.buyingClubId);
+                        const mv = p?.marketValue ?? o.fee;
+                        const big = o.fee >= Math.max(12, mv * 1.05);
+                        return (
+                          <View key={o.id} style={styles.dealRow}>
+                            <Text style={styles.dealLine} numberOfLines={2}>
+                              {big ? "★ " : ""}
+                              «{buyer?.shortName ?? o.buyingClubId}» предлагает {formatMarketValue(o.fee)}
+                              {mv ? ` (оценка ${formatMarketValue(mv)})` : ""}
+                            </Text>
+                            <View style={{ flexDirection: "row", gap: 8, marginTop: 6 }}>
+                              <Pressable
+                                style={styles.transferBuyBtn}
+                                onPress={() => doAcceptOffer(o)}
+                              >
+                                <Text style={styles.transferBuyBtnText}>Принять</Text>
+                              </Pressable>
+                              <Pressable
+                                style={styles.transferSellBtn}
+                                onPress={() => doRejectOffer(o.id)}
+                              >
+                                <Text style={styles.transferSellBtnText}>Отклонить</Text>
+                              </Pressable>
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  );
+                })}
+              </View>
+            ) : null}
+
             <View style={styles.needsBox}>
               <Text style={styles.needsTitle}>
-                {active ? `Сделки окна · ${active.label}` : "Сделки сезона"}
+                {active ? `Рынок окна · ${active.label}` : "Сделки сезона"}
+              </Text>
+              <Text style={styles.needsLead}>
+                Переходы всех клубов лиги (включая ваши). ★ — громкие сделки.
               </Text>
               {windowDeals.length === 0 ? (
                 <Text style={styles.needsLead}>Пока нет закрытых переходов в этом окне.</Text>
               ) : (
-                windowDeals.slice(0, 16).map((d) => {
+                windowDeals.slice(0, 28).map((d) => {
                   const from = clubsById.get(d.fromClubId);
                   const to = clubsById.get(d.toClubId);
                   const big = isBigTransfer(d, windowDeals);
+                  const involvesUser =
+                    d.fromClubId === save.clubId || d.toClubId === save.clubId;
                   return (
                     <View key={d.id} style={styles.dealRow}>
                       <Text style={styles.dealLine} numberOfLines={2}>
@@ -3576,6 +3726,7 @@ function TransfersScreen({
                         {" · "}
                         {d.kind === "loan" ? "аренда " : ""}
                         {formatMarketValue(d.fee)}
+                        {involvesUser ? " · вы" : ""}
                       </Text>
                       {big ? <Text style={styles.dealBig}>громкий трансфер</Text> : null}
                     </View>
@@ -4151,17 +4302,22 @@ function WindowReportScreen({
         {report.deals.length === 0 ? (
           <Text style={styles.sub}>Крупных переходов не зафиксировано.</Text>
         ) : (
-          report.deals.map((d) => (
-            <View key={d.id} style={styles.historyRow}>
-              <Text style={styles.clubName}>
-                {d.playerName}
-                {d.kind === "loan" ? " (аренда)" : ""}
-              </Text>
-              <Text style={styles.clubCity}>
-                {nameOf(d.fromClubId)} → {nameOf(d.toClubId)} · {formatMarketValue(d.fee)} · {d.date}
-              </Text>
-            </View>
-          ))
+          report.deals.map((d) => {
+            const big = isBigTransfer(d, report.deals);
+            return (
+              <View key={d.id} style={styles.historyRow}>
+                <Text style={styles.clubName}>
+                  {big ? "★ " : ""}
+                  {d.playerName}
+                  {d.kind === "loan" ? " (аренда)" : ""}
+                </Text>
+                <Text style={styles.clubCity}>
+                  {nameOf(d.fromClubId)} → {nameOf(d.toClubId)} · {formatMarketValue(d.fee)} · {d.date}
+                </Text>
+                {big ? <Text style={styles.dealBig}>громкий трансфер</Text> : null}
+              </View>
+            );
+          })
         )}
       </ScrollView>
       <Pressable style={styles.cta} onPress={onDone}>
