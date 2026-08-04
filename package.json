@@ -1,0 +1,14 @@
+{
+  "name": "football-manager",
+  "private": true,
+  "workspaces": [
+    "apps/mobile",
+    "packages/engine"
+  ],
+  "scripts": {
+    "engine:build": "npm run build -w @fm/engine",
+    "engine:test": "npm run test -w @fm/engine",
+    "mobile:start": "npm run start -w @fm/mobile",
+    "api:dev": "cd apps/api && .venv/bin/uvicorn app.main:app --reload --port 8000"
+  }
+}
