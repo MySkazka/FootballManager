@@ -3,7 +3,6 @@ import { StatusBar } from "expo-status-bar";
 import {
   Alert,
   FlatList,
-  InteractionManager,
   Modal,
   Pressable,
   ScrollView,
@@ -160,6 +159,22 @@ const NEWS_CATEGORY_LABEL: Record<string, string> = {
 
 function newsCategoryLabel(category: string): string {
   return NEWS_CATEGORY_LABEL[category] ?? category;
+}
+
+/** Schedule work after first paint — avoid InteractionManager (can stall behind gestures). */
+function afterFirstPaint(cb: () => void): () => void {
+  let cancelled = false;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const rafId = requestAnimationFrame(() => {
+    timeoutId = setTimeout(() => {
+      if (!cancelled) cb();
+    }, 0);
+  });
+  return () => {
+    cancelled = true;
+    cancelAnimationFrame(rafId);
+    if (timeoutId != null) clearTimeout(timeoutId);
+  };
 }
 
 function leagueChipLabel(league: { id: string; name: string }) {
@@ -321,15 +336,27 @@ export default function App() {
     [selectedLeague]
   );
 
-  /** Preview squads for club select (same seed as createCareer). */
-  const previewPlayers = useMemo(() => generateWorldPlayers(pack, 2026), []);
-  const clubSquadOvr = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const c of pack.clubs) {
-      m.set(c.id, squadAverageOverall(previewPlayers, c.id));
-    }
-    return m;
-  }, [previewPlayers]);
+  /**
+   * Preview OVR for club select only — never block career screens.
+   * Same seed as createCareer (2026). Deferred so select UI paints first.
+   */
+  const [clubSquadOvr, setClubSquadOvr] = useState<Map<string, number>>(() => new Map());
+  useEffect(() => {
+    if (save) return;
+    let cancelled = false;
+    const cancel = afterFirstPaint(() => {
+      const players = generateWorldPlayers(pack, 2026);
+      const m = new Map<string, number>();
+      for (const c of pack.clubs) {
+        m.set(c.id, squadAverageOverall(players, c.id));
+      }
+      if (!cancelled) setClubSquadOvr(m);
+    });
+    return () => {
+      cancelled = true;
+      cancel();
+    };
+  }, [save]);
 
   const startCareer = (club: Club) => {
     setSave(createCareer(pack, club.id, "Менеджер", 2026));
@@ -768,10 +795,10 @@ export default function App() {
                 {club.city} · {club.vibe}
               </Text>
               <Text style={styles.clubCity}>
-                Состав ~{clubSquadOvr.get(club.id) ?? "—"} · престиж {club.reputation}
+                Состав ~{clubSquadOvr.get(club.id) ?? "…"} · престиж {club.reputation}
               </Text>
             </View>
-            <Text style={styles.rep}>{clubSquadOvr.get(club.id) ?? "—"}</Text>
+            <Text style={styles.rep}>{clubSquadOvr.get(club.id) ?? "…"}</Text>
           </Pressable>
         ))}
       </ScrollView>
@@ -808,11 +835,22 @@ function CareerScreen({
   const [statsBoard, setStatsBoard] = useState<
     "goals" | "assists" | "ga" | "rating" | "cards" | "keepers"
   >("goals");
+  const [tabReady, setTabReady] = useState(true);
+  const clubsById = useMemo(() => new Map(pack.clubs.map((c) => [c.id, c])), [pack.clubs]);
   const transferTips = useMemo(
     () => analyzeSquadNeeds(save.players, save.clubId, save.userTactics),
     [save.players, save.clubId, save.userTactics]
   );
   const transferTipSummary = squadNeedsSummary(transferTips);
+
+  useEffect(() => {
+    if (tab === "table") {
+      setTabReady(true);
+      return;
+    }
+    setTabReady(false);
+    return afterFirstPaint(() => setTabReady(true));
+  }, [tab]);
 
   if (!club || !homeLeague) {
     return (
@@ -942,7 +980,7 @@ function CareerScreen({
                   <Text style={styles.thPts}>О</Text>
                 </View>
                 {table.map((row, i) => {
-                  const c = pack.clubs.find((x) => x.id === row.clubId);
+                  const c = clubsById.get(row.clubId);
                   if (!c) return null;
                   const mine = row.clubId === save.clubId;
                   const place = i + 1;
@@ -1007,159 +1045,186 @@ function CareerScreen({
         </ScrollView>
       )}
 
-      {tab === "uefa" && (
-        <ScrollView>
-          <Text style={styles.section}>Рейтинг ассоциаций УЕФА</Text>
-          <Text style={styles.hint}>
-            Сумма коэффициентов за 5 сезонов. От рейтинга зависит, сколько клубов страны играет в ЛЧ, ЛЕ и Лиге конференций.
-            Текущий сезон копится отдельно (очки / число клубов в еврокубках).
-          </Text>
-          <View style={styles.tableHead}>
-            <Text style={styles.thRank}>#</Text>
-            <Text style={[styles.thClub, { flex: 1.2 }]}>Страна</Text>
-            <Text style={styles.thGoals}>5 лет</Text>
-            <Text style={styles.thGoals}>Сезон</Text>
-            <Text style={styles.thGoals}>Слоты</Text>
-          </View>
-          {uefaRanking(pack, ensureUefaState(pack, save)).map((row) => {
-            const mine = row.federationId === club.federationId;
-            return (
-              <View
-                key={row.federationId}
-                style={[styles.tableRow, mine && styles.tableRowMineBorder]}
-              >
-                <Text style={styles.tdRank}>{row.rank}</Text>
-                <Text style={[styles.tableClub, { flex: 1.2 }]} numberOfLines={1}>
-                  {row.name}
-                </Text>
-                <Text style={styles.tdGoals}>{row.total.toFixed(1)}</Text>
-                <Text style={styles.tdGoals}>{row.seasonScore.toFixed(2)}</Text>
-                <Text style={styles.tdGoals}>
-                  {row.slots.ucl}/{row.slots.uel}/{row.slots.uecl}
-                </Text>
-              </View>
-            );
-          })}
-          <Text style={styles.hint}>
-            Слоты: ЛЧ / ЛЕ / ЛК — по текущему рейтингу ассоциации УЕФА.
-          </Text>
-        </ScrollView>
-      )}
-
-      {tab === "stats" && (
-        <ScrollView>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.leagueRow}
-            contentContainerStyle={styles.leagueRowContent}
-          >
-            {(
-              [
-                ["goals", "Голы"],
-                ["assists", "Пасы"],
-                ["ga", "Г+П"],
-                ["rating", "Оценка"],
-                ["cards", "Карточки"],
-                ["keepers", "Вратари"],
-              ] as const
-            ).map(([id, label]) => (
-              <Pressable
-                key={id}
-                onPress={() => setStatsBoard(id)}
-                style={[styles.leagueChip, statsBoard === id && styles.leagueChipActive]}
-              >
-                <Text
-                  style={[styles.leagueChipText, statsBoard === id && styles.leagueChipTextActive]}
+      {tab === "uefa" &&
+        (tabReady ? (
+          <ScrollView>
+            <Text style={styles.section}>Рейтинг ассоциаций УЕФА</Text>
+            <Text style={styles.hint}>
+              Сумма коэффициентов за 5 сезонов. От рейтинга зависит, сколько клубов страны играет в ЛЧ, ЛЕ и Лиге конференций.
+              Текущий сезон копится отдельно (очки / число клубов в еврокубках).
+            </Text>
+            <View style={styles.tableHead}>
+              <Text style={styles.thRank}>#</Text>
+              <Text style={[styles.thClub, { flex: 1.2 }]}>Страна</Text>
+              <Text style={styles.thGoals}>5 лет</Text>
+              <Text style={styles.thGoals}>Сезон</Text>
+              <Text style={styles.thGoals}>Слоты</Text>
+            </View>
+            {uefaRanking(pack, ensureUefaState(pack, save)).map((row) => {
+              const mine = row.federationId === club.federationId;
+              return (
+                <View
+                  key={row.federationId}
+                  style={[styles.tableRow, mine && styles.tableRowMineBorder]}
                 >
-                  {label}
-                </Text>
-              </Pressable>
-            ))}
+                  <Text style={styles.tdRank}>{row.rank}</Text>
+                  <Text style={[styles.tableClub, { flex: 1.2 }]} numberOfLines={1}>
+                    {row.name}
+                  </Text>
+                  <Text style={styles.tdGoals}>{row.total.toFixed(1)}</Text>
+                  <Text style={styles.tdGoals}>{row.seasonScore.toFixed(2)}</Text>
+                  <Text style={styles.tdGoals}>
+                    {row.slots.ucl}/{row.slots.uel}/{row.slots.uecl}
+                  </Text>
+                </View>
+              );
+            })}
+            <Text style={styles.hint}>
+              Слоты: ЛЧ / ЛЕ / ЛК — по текущему рейтингу ассоциации УЕФА.
+            </Text>
           </ScrollView>
-          {statsBoard === "goals" ? (
-            <Leaderboard
-              title="Бомбардиры"
-              rows={leagueTopScorers(save.playerStats, viewLeague.clubIds, 20)}
-              save={save}
-              pack={pack}
-              value={(s) => `${s.goals}`}
-            />
-          ) : null}
-          {statsBoard === "assists" ? (
-            <Leaderboard
-              title="Ассистенты"
-              rows={leagueTopAssists(save.playerStats, viewLeague.clubIds, 20)}
-              save={save}
-              pack={pack}
-              value={(s) => `${s.assists}`}
-            />
-          ) : null}
-          {statsBoard === "ga" ? (
-            <Leaderboard
-              title="Гол + пас"
-              rows={leagueTopGoalInvolvements(save.playerStats, viewLeague.clubIds, 20)}
-              save={save}
-              pack={pack}
-              value={(s) => `${s.goals + s.assists} · ${s.goals}г ${s.assists}п`}
-            />
-          ) : null}
-          {statsBoard === "rating" ? (
-            <Leaderboard
-              title="Средняя оценка"
-              rows={leagueTopRatings(save.playerStats, viewLeague.clubIds, 20)}
-              save={save}
-              pack={pack}
-              value={(s) => `${averageRating(s).toFixed(1)} · ${s.appearances} игр`}
-            />
-          ) : null}
-          {statsBoard === "cards" ? (
-            <Leaderboard
-              title="Карточки"
-              rows={leagueTopCards(save.playerStats, viewLeague.clubIds, 20)}
-              save={save}
-              pack={pack}
-              value={(s) => `${s.yellowCards ?? 0} ж · ${s.redCards ?? 0} к`}
-            />
-          ) : null}
-          {statsBoard === "keepers" ? (
-            <Leaderboard
-              title="Вратари"
-              rows={leagueTopKeepers(save.playerStats, viewLeague.clubIds, save.players, 20)}
-              save={save}
-              pack={pack}
-              value={(s) =>
-                `${s.cleanSheets ?? 0} «0» · ${s.saves ?? 0} сейв · ${s.goalsConceded ?? 0} пр`
-              }
-            />
-          ) : null}
-        </ScrollView>
-      )}
+        ) : (
+          <Text style={styles.sub}>Загрузка…</Text>
+        ))}
 
-      {tab === "tactics" && (
-        <ScrollView>
-          <TacticsPanel
-            tactics={save.userTactics}
-            squad={squad}
-            clubId={club.id}
-            jersey={club.colors[0]}
+      {tab === "stats" &&
+        (tabReady ? (
+          <ScrollView>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.leagueRow}
+              contentContainerStyle={styles.leagueRowContent}
+            >
+              {(
+                [
+                  ["goals", "Голы"],
+                  ["assists", "Пасы"],
+                  ["ga", "Г+П"],
+                  ["rating", "Оценка"],
+                  ["cards", "Карточки"],
+                  ["keepers", "Вратари"],
+                ] as const
+              ).map(([id, label]) => (
+                <Pressable
+                  key={id}
+                  onPress={() => setStatsBoard(id)}
+                  style={[styles.leagueChip, statsBoard === id && styles.leagueChipActive]}
+                >
+                  <Text
+                    style={[
+                      styles.leagueChipText,
+                      statsBoard === id && styles.leagueChipTextActive,
+                    ]}
+                  >
+                    {label}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            {statsBoard === "goals" ? (
+              <Leaderboard
+                title="Бомбардиры"
+                rows={leagueTopScorers(save.playerStats, viewLeague.clubIds, 20)}
+                save={save}
+                pack={pack}
+                clubsById={clubsById}
+                value={(s) => `${s.goals}`}
+              />
+            ) : null}
+            {statsBoard === "assists" ? (
+              <Leaderboard
+                title="Ассистенты"
+                rows={leagueTopAssists(save.playerStats, viewLeague.clubIds, 20)}
+                save={save}
+                pack={pack}
+                clubsById={clubsById}
+                value={(s) => `${s.assists}`}
+              />
+            ) : null}
+            {statsBoard === "ga" ? (
+              <Leaderboard
+                title="Гол + пас"
+                rows={leagueTopGoalInvolvements(save.playerStats, viewLeague.clubIds, 20)}
+                save={save}
+                pack={pack}
+                clubsById={clubsById}
+                value={(s) => `${s.goals + s.assists} · ${s.goals}г ${s.assists}п`}
+              />
+            ) : null}
+            {statsBoard === "rating" ? (
+              <Leaderboard
+                title="Средняя оценка"
+                rows={leagueTopRatings(save.playerStats, viewLeague.clubIds, 20)}
+                save={save}
+                pack={pack}
+                clubsById={clubsById}
+                value={(s) => `${averageRating(s).toFixed(1)} · ${s.appearances} игр`}
+              />
+            ) : null}
+            {statsBoard === "cards" ? (
+              <Leaderboard
+                title="Карточки"
+                rows={leagueTopCards(save.playerStats, viewLeague.clubIds, 20)}
+                save={save}
+                pack={pack}
+                clubsById={clubsById}
+                value={(s) => `${s.yellowCards ?? 0} ж · ${s.redCards ?? 0} к`}
+              />
+            ) : null}
+            {statsBoard === "keepers" ? (
+              <Leaderboard
+                title="Вратари"
+                rows={leagueTopKeepers(save.playerStats, viewLeague.clubIds, save.players, 20)}
+                save={save}
+                pack={pack}
+                clubsById={clubsById}
+                value={(s) =>
+                  `${s.cleanSheets ?? 0} «0» · ${s.saves ?? 0} сейв · ${s.goalsConceded ?? 0} пр`
+                }
+              />
+            ) : null}
+          </ScrollView>
+        ) : (
+          <Text style={styles.sub}>Загрузка…</Text>
+        ))}
+
+      {tab === "tactics" &&
+        (tabReady ? (
+          <ScrollView>
+            <TacticsPanel
+              tactics={save.userTactics}
+              squad={squad}
+              clubId={club.id}
+              jersey={club.colors[0]}
               jerseySecondary={club.colors[1]}
-            onChange={onTactics}
-            lineupContext={{
-              stats: save.playerStats,
-              suspensions: save.suspensions ?? {},
-            }}
-          />
-        </ScrollView>
-      )}
+              onChange={onTactics}
+              lineupContext={{
+                stats: save.playerStats,
+                suspensions: save.suspensions ?? {},
+              }}
+            />
+          </ScrollView>
+        ) : (
+          <Text style={styles.sub}>Загрузка…</Text>
+        ))}
 
-      {tab === "news" && (
-        <ScrollView style={styles.news}>
-          {save.news.slice(0, 30).map((n) => (
-            <NewsCard key={n.id} item={n} pack={pack} save={save} />
-          ))}
-        </ScrollView>
-      )}
+      {tab === "news" &&
+        (tabReady ? (
+          <FlatList
+            style={styles.news}
+            data={save.news.slice(0, 30)}
+            keyExtractor={(n) => n.id}
+            initialNumToRender={6}
+            maxToRenderPerBatch={4}
+            windowSize={5}
+            removeClippedSubviews
+            renderItem={({ item: n }) => <NewsCard item={n} pack={pack} save={save} />}
+            contentContainerStyle={{ paddingBottom: 24 }}
+          />
+        ) : (
+          <Text style={styles.sub}>Загрузка…</Text>
+        ))}
     </View>
   );
 }
@@ -1169,21 +1234,24 @@ function Leaderboard({
   rows,
   save,
   pack,
+  clubsById,
   value,
 }: {
   title: string;
   rows: CareerSave["playerStats"][string][];
   save: CareerSave;
   pack: WorldPack;
+  clubsById?: Map<string, Club>;
   value: (s: CareerSave["playerStats"][string]) => string;
 }) {
+  const playersById = useMemo(() => new Map(save.players.map((p) => [p.id, p])), [save.players]);
   return (
     <View style={{ marginBottom: 16 }}>
       <Text style={styles.section}>{title}</Text>
       {rows.length === 0 ? <Text style={styles.sub}>Пока пусто — сыграйте туры</Text> : null}
       {rows.map((s, i) => {
-        const p = save.players.find((x) => x.id === s.playerId);
-        const c = pack.clubs.find((x) => x.id === s.clubId);
+        const p = playersById.get(s.playerId);
+        const c = clubsById?.get(s.clubId) ?? pack.clubs.find((x) => x.id === s.clubId);
         if (!p || !c) return null;
         return (
           <View key={s.playerId} style={styles.statRow}>
@@ -2422,19 +2490,35 @@ function SquadScreen({
 }) {
   const club = pack.clubs.find((c) => c.id === clubId)!;
   const isUserClub = clubId === save.clubId;
-  const squad = sortSquad(save.players.filter((p) => p.clubId === clubId));
+  const squad = useMemo(
+    () => sortSquad(save.players.filter((p) => p.clubId === clubId)),
+    [save.players, clubId]
+  );
   const [tab, setTab] = useState<"tactics" | "list" | "history">(
     isUserClub ? "tactics" : "list"
   );
+  const [historyReady, setHistoryReady] = useState(false);
+
+  useEffect(() => {
+    if (tab !== "history") {
+      setHistoryReady(false);
+      return;
+    }
+    return afterFirstPaint(() => setHistoryReady(true));
+  }, [tab]);
+
   const history = useMemo(() => buildClubHistory(pack, clubId), [pack, clubId]);
-  const living = useMemo(() => careerLegendsForClub(save, clubId), [save, clubId]);
+  const living = useMemo(
+    () => (historyReady ? careerLegendsForClub(save, clubId) : []),
+    [save, clubId, historyReady]
+  );
   const played = useMemo(
-    () => clubPlayedMatches(pack, save, clubId, 30),
-    [pack, save, clubId]
+    () => (historyReady ? clubPlayedMatches(pack, save, clubId, 30) : []),
+    [pack, save, clubId, historyReady]
   );
   const euroSoon = useMemo(
-    () => upcomingClubEuroFixtures(pack, save, clubId),
-    [pack, save, clubId]
+    () => (historyReady ? upcomingClubEuroFixtures(pack, save, clubId) : []),
+    [pack, save, clubId, historyReady]
   );
   const euroAccess = hasContinentalAccess(pack, club.federationId, save.season);
 
@@ -2478,154 +2562,170 @@ function SquadScreen({
         </Pressable>
       </View>
 
-      <ScrollView contentContainerStyle={{ paddingBottom: 28 }}>
-        {isUserClub && onTactics && tab === "tactics" ? (
-          <TacticsPanel
-            tactics={save.userTactics}
-            squad={squad}
-            clubId={club.id}
-            jersey={club.colors[0]}
-            jerseySecondary={club.colors[1]}
-            onChange={onTactics}
-            lineupContext={{
-              stats: save.playerStats,
-              suspensions: save.suspensions ?? {},
-            }}
-          />
-        ) : null}
+      {tab === "list" ? (
+        <FlatList
+          data={squad}
+          keyExtractor={(p) => p.id}
+          initialNumToRender={12}
+          maxToRenderPerBatch={8}
+          windowSize={7}
+          removeClippedSubviews
+          contentContainerStyle={{ paddingBottom: 28 }}
+          renderItem={({ item: p }) => {
+            const st = save.playerStats[p.id];
+            return (
+              <Pressable style={styles.playerRow} onPress={() => onPlayer(p.id)}>
+                <PersonPortrait
+                  seed={p.id}
+                  size={44}
+                  jersey={club.colors[0]}
+                  jerseySecondary={club.colors[1]}
+                  age={p.age}
+                  portraitId={p.portraitId}
+                  nationalityId={p.nationalityId}
+                />
+                <Text style={[styles.posBadge, { width: 64 }]}>{rolesLabel(p)}</Text>
+                <View style={styles.clubMeta}>
+                  <Text style={styles.clubName}>
+                    {playerNameWithAge(p)}
+                    {p.loan ? " · аренда" : ""}
+                    {isLastCareerSeason(p) ? " · последний сезон" : ""}
+                  </Text>
+                  <Text style={styles.clubCity}>
+                    {nationalityShort(p.nationalityId)}
+                    {" · "}
+                    {topStrengths(p, 2).map((s) => ATTRIBUTE_LABEL[s.key]).join(" · ")}
+                    {st ? ` · ${st.goals}г ${st.assists}п` : ""}
+                    {` · ${formatMarketValue(p.marketValue)}`}
+                  </Text>
+                </View>
+                <Text style={styles.rep}>{p.overall}</Text>
+              </Pressable>
+            );
+          }}
+        />
+      ) : (
+        <ScrollView contentContainerStyle={{ paddingBottom: 28 }}>
+          {isUserClub && onTactics && tab === "tactics" ? (
+            <TacticsPanel
+              tactics={save.userTactics}
+              squad={squad}
+              clubId={club.id}
+              jersey={club.colors[0]}
+              jerseySecondary={club.colors[1]}
+              onChange={onTactics}
+              lineupContext={{
+                stats: save.playerStats,
+                suspensions: save.suspensions ?? {},
+              }}
+            />
+          ) : null}
 
-        {tab === "list"
-          ? squad.map((p) => {
-              const st = save.playerStats[p.id];
-              return (
-                <Pressable key={p.id} style={styles.playerRow} onPress={() => onPlayer(p.id)}>
-                  <PersonPortrait
-                    seed={p.id}
-                    size={44}
-                    jersey={club.colors[0]}
-                    jerseySecondary={club.colors[1]}
-                    age={p.age}
-                    portraitId={p.portraitId}
-                    nationalityId={p.nationalityId}
-                  />
-                  <Text style={[styles.posBadge, { width: 64 }]}>{rolesLabel(p)}</Text>
-                  <View style={styles.clubMeta}>
-                    <Text style={styles.clubName}>
-                      {playerNameWithAge(p)}
-                      {p.loan ? " · аренда" : ""}
-                      {isLastCareerSeason(p) ? " · последний сезон" : ""}
-                    </Text>
-                    <Text style={styles.clubCity}>
-                      {nationalityShort(p.nationalityId)}
-                      {" · "}
-                      {topStrengths(p, 2).map((s) => ATTRIBUTE_LABEL[s.key]).join(" · ")}
-                      {st ? ` · ${st.goals}г ${st.assists}п` : ""}
-                      {` · ${formatMarketValue(p.marketValue)}`}
-                    </Text>
-                  </View>
-                  <Text style={styles.rep}>{p.overall}</Text>
-                </Pressable>
-              );
-            })
-          : null}
-
-        {tab === "history" && history ? (
-          <View style={{ gap: 12 }}>
-            <Text style={styles.historyMotto}>«{history.motto}»</Text>
-            <Text style={styles.section}>Трофеи и вехи</Text>
-            {history.honours.map((h) => (
-              <Text key={h} style={styles.sub}>
-                · {h}
-              </Text>
-            ))}
-
-            <Text style={styles.section}>Легенды клуба</Text>
-            {history.legends.map((lg) => (
-              <View key={lg.id} style={styles.historyRow}>
-                <Text style={styles.clubName}>
-                  {lg.firstName} {lg.lastName}
+          {tab === "history" && history ? (
+            <View style={{ gap: 12 }}>
+              <Text style={styles.historyMotto}>«{history.motto}»</Text>
+              <Text style={styles.section}>Трофеи и вехи</Text>
+              {history.honours.map((h) => (
+                <Text key={h} style={styles.sub}>
+                  · {h}
                 </Text>
-                <Text style={styles.clubCity}>
-                  {lg.positionLabel} · {lg.years} · пик {lg.peakOverall}
-                </Text>
-                <Text style={styles.hint}>{lg.capsNote}</Text>
-              </View>
-            ))}
-            {living.length ? (
-              <>
-                <Text style={styles.section}>Звёзды эпохи</Text>
-                {living.map((lg) => (
-                  <View key={lg.id} style={styles.historyRow}>
-                    <Text style={styles.clubName}>
-                      {lg.firstName} {lg.lastName}
-                    </Text>
-                    <Text style={styles.clubCity}>
-                      {lg.positionLabel} · {lg.years} · {lg.peakOverall}
-                    </Text>
-                    <Text style={styles.hint}>{lg.capsNote}</Text>
-                  </View>
-                ))}
-              </>
-            ) : null}
+              ))}
 
-            <Text style={styles.section}>Классика прошлых лет</Text>
-            {history.classicMatches.map((m) => (
-              <View key={m.id} style={styles.historyRow}>
-                <Text style={styles.clubName}>
-                  {m.homeName} {m.score} {m.awayName}
-                </Text>
-                <Text style={styles.clubCity}>
-                  {m.competition} · {m.season}
-                </Text>
-                <Text style={styles.hint}>{m.note}</Text>
-              </View>
-            ))}
+              <Text style={styles.section}>Легенды клуба</Text>
+              {history.legends.map((lg) => (
+                <View key={lg.id} style={styles.historyRow}>
+                  <Text style={styles.clubName}>
+                    {lg.firstName} {lg.lastName}
+                  </Text>
+                  <Text style={styles.clubCity}>
+                    {lg.positionLabel} · {lg.years} · пик {lg.peakOverall}
+                  </Text>
+                  <Text style={styles.hint}>{lg.capsNote}</Text>
+                </View>
+              ))}
+              {historyReady && living.length ? (
+                <>
+                  <Text style={styles.section}>Звёзды эпохи</Text>
+                  {living.map((lg) => (
+                    <View key={lg.id} style={styles.historyRow}>
+                      <Text style={styles.clubName}>
+                        {lg.firstName} {lg.lastName}
+                      </Text>
+                      <Text style={styles.clubCity}>
+                        {lg.positionLabel} · {lg.years} · {lg.peakOverall}
+                      </Text>
+                      <Text style={styles.hint}>{lg.capsNote}</Text>
+                    </View>
+                  ))}
+                </>
+              ) : null}
 
-            {euroSoon.length ? (
-              <>
-                <Text style={styles.section}>Еврокубки · календарь</Text>
-                {euroSoon.map((f) => {
-                  const home = pack.clubs.find((c) => c.id === f.homeClubId);
-                  const away = pack.clubs.find((c) => c.id === f.awayClubId);
-                  const cup = pack.tournaments.find((t) => t.id === f.tournamentId);
-                  return (
-                    <Text key={f.id} style={styles.sub}>
-                      {f.date} · {cup?.name ?? "Евро"} · {home?.shortName} — {away?.shortName}
-                    </Text>
-                  );
-                })}
-              </>
-            ) : euroAccess ? (
-              <Text style={styles.hint}>
-                Федерация допущена к еврокубкам. Места распределяются по рейтингу клубов.
-              </Text>
-            ) : null}
-
-            <Text style={styles.section}>Результаты сезона</Text>
-            {played.length === 0 ? (
-              <Text style={styles.sub}>Пока нет сыгранных матчей</Text>
-            ) : (
-              played.map((m) => (
+              <Text style={styles.section}>Классика прошлых лет</Text>
+              {history.classicMatches.map((m) => (
                 <View key={m.id} style={styles.historyRow}>
                   <Text style={styles.clubName}>
                     {m.homeName} {m.score} {m.awayName}
                   </Text>
-                  <Text
-                    style={[
-                      styles.clubCity,
-                      m.won && { color: "#6BCB8A" },
-                      !m.won && !m.drawn && { color: "#E07A5F" },
-                    ]}
-                  >
-                    {m.date} · {m.competition}
-                    {m.won ? " · победа" : m.drawn ? " · ничья" : " · поражение"}
+                  <Text style={styles.clubCity}>
+                    {m.competition} · {m.season}
                   </Text>
+                  <Text style={styles.hint}>{m.note}</Text>
                 </View>
-              ))
-            )}
-          </View>
-        ) : null}
-      </ScrollView>
+              ))}
+
+              {!historyReady ? (
+                <Text style={styles.sub}>Загрузка результатов сезона…</Text>
+              ) : (
+                <>
+                  {euroSoon.length ? (
+                    <>
+                      <Text style={styles.section}>Еврокубки · календарь</Text>
+                      {euroSoon.map((f) => {
+                        const home = pack.clubs.find((c) => c.id === f.homeClubId);
+                        const away = pack.clubs.find((c) => c.id === f.awayClubId);
+                        const cup = pack.tournaments.find((t) => t.id === f.tournamentId);
+                        return (
+                          <Text key={f.id} style={styles.sub}>
+                            {f.date} · {cup?.name ?? "Евро"} · {home?.shortName} —{" "}
+                            {away?.shortName}
+                          </Text>
+                        );
+                      })}
+                    </>
+                  ) : euroAccess ? (
+                    <Text style={styles.hint}>
+                      Федерация допущена к еврокубкам. Места распределяются по рейтингу клубов.
+                    </Text>
+                  ) : null}
+
+                  <Text style={styles.section}>Результаты сезона</Text>
+                  {played.length === 0 ? (
+                    <Text style={styles.sub}>Пока нет сыгранных матчей</Text>
+                  ) : (
+                    played.map((m) => (
+                      <View key={m.id} style={styles.historyRow}>
+                        <Text style={styles.clubName}>
+                          {m.homeName} {m.score} {m.awayName}
+                        </Text>
+                        <Text
+                          style={[
+                            styles.clubCity,
+                            m.won && { color: "#6BCB8A" },
+                            !m.won && !m.drawn && { color: "#E07A5F" },
+                          ]}
+                        >
+                          {m.date} · {m.competition}
+                          {m.won ? " · победа" : m.drawn ? " · ничья" : " · поражение"}
+                        </Text>
+                      </View>
+                    ))
+                  )}
+                </>
+              )}
+            </View>
+          ) : null}
+        </ScrollView>
+      )}
     </View>
   );
 }
@@ -3296,6 +3396,7 @@ function TransfersScreen({
   const [sortBy, setSortBy] = useState<"rating" | "value">("value");
   const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
   const [listsReady, setListsReady] = useState(false);
+  const [headerReady, setHeaderReady] = useState(false);
   const [, startTransition] = useTransition();
   const [dialog, setDialog] = useState<
     | null
@@ -3310,11 +3411,16 @@ function TransfersScreen({
 
   useEffect(() => {
     setListsReady(false);
-    const task = InteractionManager.runAfterInteractions(() => {
+    setHeaderReady(false);
+    const cancelHeader = afterFirstPaint(() => setHeaderReady(true));
+    const cancelLists = afterFirstPaint(() => {
       startTransition(() => setListsReady(true));
     });
-    return () => task.cancel();
-  }, [tab, save.id]);
+    return () => {
+      cancelHeader();
+      cancelLists();
+    };
+  }, [save.id]);
 
   const open = isTransferWindowOpen(save);
   const active = getActiveTransferWindow(save);
@@ -3374,6 +3480,7 @@ function TransfersScreen({
   const needPositions = useMemo(() => new Set(needs.map((n) => n.position)), [needs]);
 
   const buyList = useMemo(() => {
+    if (tab !== "buy") return [];
     const filtered =
       posFilter === "all"
         ? targets
@@ -3387,9 +3494,10 @@ function TransfersScreen({
       const d = ((a.marketValue ?? 0) - (b.marketValue ?? 0)) * dir;
       return d || (a.overall - b.overall) * dir;
     });
-  }, [targets, posFilter, sortBy, sortDir]);
+  }, [targets, posFilter, sortBy, sortDir, tab]);
 
   const sellList = useMemo(() => {
+    if (tab !== "sell") return [];
     const squad = save.players.filter((p) => p.clubId === save.clubId);
     const filtered =
       posFilter === "all"
@@ -3404,7 +3512,7 @@ function TransfersScreen({
       const d = ((a.marketValue ?? 0) - (b.marketValue ?? 0)) * dir;
       return d || (a.overall - b.overall) * dir;
     });
-  }, [save.players, save.clubId, posFilter, sortBy, sortDir]);
+  }, [save.players, save.clubId, posFilter, sortBy, sortDir, tab]);
 
   const loanList = useMemo(() => {
     const filtered =
@@ -3700,40 +3808,44 @@ function TransfersScreen({
               </View>
             ) : null}
 
-            <View style={styles.needsBox}>
-              <Text style={styles.needsTitle}>
-                {active ? `Рынок окна · ${active.label}` : "Сделки сезона"}
-              </Text>
-              <Text style={styles.needsLead}>
-                Переходы всех клубов лиги (включая ваши). ★ — громкие сделки.
-              </Text>
-              {windowDeals.length === 0 ? (
-                <Text style={styles.needsLead}>Пока нет закрытых переходов в этом окне.</Text>
-              ) : (
-                windowDeals.slice(0, 28).map((d) => {
-                  const from = clubsById.get(d.fromClubId);
-                  const to = clubsById.get(d.toClubId);
-                  const big = isBigTransfer(d, windowDeals);
-                  const involvesUser =
-                    d.fromClubId === save.clubId || d.toClubId === save.clubId;
-                  return (
-                    <View key={d.id} style={styles.dealRow}>
-                      <Text style={styles.dealLine} numberOfLines={2}>
-                        {big ? "★ " : ""}
-                        «{from?.shortName ?? d.fromClubId}» → «{to?.shortName ?? d.toClubId}»
-                        {" · "}
-                        {d.playerName}
-                        {" · "}
-                        {d.kind === "loan" ? "аренда " : ""}
-                        {formatMarketValue(d.fee)}
-                        {involvesUser ? " · вы" : ""}
-                      </Text>
-                      {big ? <Text style={styles.dealBig}>громкий трансфер</Text> : null}
-                    </View>
-                  );
-                })
-              )}
-            </View>
+            {headerReady ? (
+              <View style={styles.needsBox}>
+                <Text style={styles.needsTitle}>
+                  {active ? `Рынок окна · ${active.label}` : "Сделки сезона"}
+                </Text>
+                <Text style={styles.needsLead}>
+                  Переходы всех клубов лиги (включая ваши). ★ — громкие сделки.
+                </Text>
+                {windowDeals.length === 0 ? (
+                  <Text style={styles.needsLead}>Пока нет закрытых переходов в этом окне.</Text>
+                ) : (
+                  windowDeals.slice(0, 16).map((d) => {
+                    const from = clubsById.get(d.fromClubId);
+                    const to = clubsById.get(d.toClubId);
+                    const big = isBigTransfer(d, windowDeals);
+                    const involvesUser =
+                      d.fromClubId === save.clubId || d.toClubId === save.clubId;
+                    return (
+                      <View key={d.id} style={styles.dealRow}>
+                        <Text style={styles.dealLine} numberOfLines={2}>
+                          {big ? "★ " : ""}
+                          «{from?.shortName ?? d.fromClubId}» → «{to?.shortName ?? d.toClubId}»
+                          {" · "}
+                          {d.playerName}
+                          {" · "}
+                          {d.kind === "loan" ? "аренда " : ""}
+                          {formatMarketValue(d.fee)}
+                          {involvesUser ? " · вы" : ""}
+                        </Text>
+                        {big ? <Text style={styles.dealBig}>громкий трансфер</Text> : null}
+                      </View>
+                    );
+                  })
+                )}
+              </View>
+            ) : (
+              <Text style={styles.hint}>Рынок окна загружается…</Text>
+            )}
 
             <View style={styles.needsBox}>
               <Text style={styles.needsTitle}>Куда усилить состав</Text>
@@ -4058,23 +4170,31 @@ function CalendarScreen({
   const [mode, setMode] = useState<"league" | "euro">("league");
   const [leagueId, setLeagueId] = useState(homeLeague?.id ?? pack.leagues[0]?.id ?? "rpl");
   const [euroCup, setEuroCup] = useState<"all" | "ucl" | "uel" | "uecl">("all");
-  const [mineOnly, setMineOnly] = useState(false);
-  const [ready, setReady] = useState(false);
-
-  useEffect(() => {
-    setReady(false);
-    const task = InteractionManager.runAfterInteractions(() => setReady(true));
-    return () => task.cancel();
-  }, [mode, leagueId, euroCup, mineOnly, save.id]);
+  const [mineOnly, setMineOnly] = useState(true);
 
   const clubsById = useMemo(() => new Map(pack.clubs.map((c) => [c.id, c])), [pack.clubs]);
   const tournamentName = useMemo(() => {
     const m = new Map(pack.tournaments.map((t) => [t.id, t.name]));
     return m;
   }, [pack.tournaments]);
+  const leagueByClubId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const league of pack.leagues) {
+      const label = leagueChipLabel(league);
+      for (const id of league.clubIds) m.set(id, label);
+    }
+    return m;
+  }, [pack.leagues]);
+  const fedByClubId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of pack.clubs) {
+      const fed = pack.federations.find((f) => f.id === c.federationId);
+      m.set(c.id, fed?.name ?? c.federationId);
+    }
+    return m;
+  }, [pack.clubs, pack.federations]);
 
   const fixtures = useMemo(() => {
-    if (!ready) return [];
     const clubFilter = mineOnly ? save.clubId : undefined;
     if (mode === "league") {
       return listLeagueCalendar(save, leagueId, { clubId: clubFilter });
@@ -4083,7 +4203,7 @@ function CalendarScreen({
       tournamentId: euroCup,
       clubId: clubFilter,
     });
-  }, [save, mode, leagueId, euroCup, mineOnly, ready]);
+  }, [save, mode, leagueId, euroCup, mineOnly]);
 
   const matchdays = useMemo(() => groupFixturesByDate(fixtures), [fixtures]);
   const viewLeague = pack.leagues.find((l) => l.id === leagueId);
@@ -4093,14 +4213,8 @@ function CalendarScreen({
       : pack.tournaments.find((t) => t.id === euroCup)?.name ?? euroCup;
 
   const shortName = (id: string) => clubsById.get(id)?.shortName ?? id;
-  const leagueOf = (clubId: string) => {
-    const c = clubsById.get(clubId);
-    if (!c) return null;
-    const league = pack.leagues.find((l) => l.clubIds.includes(clubId));
-    if (league) return leagueChipLabel(league);
-    const fed = pack.federations.find((f) => f.id === c.federationId);
-    return fed?.name ?? c.federationId;
-  };
+  const leagueOf = (clubId: string) =>
+    leagueByClubId.get(clubId) ?? fedByClubId.get(clubId) ?? clubId;
   const groupOf = (f: Fixture) => {
     const m = f.id.match(/-g(\d+)-/);
     return m ? `Группа ${m[1]}` : null;
@@ -4207,7 +4321,7 @@ function CalendarScreen({
         {mode === "league" ? viewLeague?.name ?? "Чемпионат" : euroTitle}
       </Text>
       <Text style={styles.hint}>
-        {ready ? `${matchdays.length} туров · ${fixtures.length} матчей` : "Загрузка…"}
+        {`${matchdays.length} туров · ${fixtures.length} матчей`}
         {mineOnly ? " · ваш клуб" : ""}
       </Text>
 
@@ -4221,11 +4335,9 @@ function CalendarScreen({
         contentContainerStyle={{ paddingBottom: 32 }}
         ListEmptyComponent={
           <Text style={styles.sub}>
-            {!ready
-              ? "Собираем календарь…"
-              : mode === "euro"
-                ? "Еврокубковых матчей в календаре пока нет."
-                : "Матчей не найдено."}
+            {mode === "euro"
+              ? "Еврокубковых матчей в календаре пока нет."
+              : "Матчей не найдено."}
           </Text>
         }
         renderItem={({ item: md }) => {

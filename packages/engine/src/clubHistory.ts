@@ -90,12 +90,16 @@ export function buildClubHistory(pack: WorldPack, clubId: string): ClubHistory |
   const rng = new Rng(hash(clubId + ":history"));
   const founded = 1895 + (hash(clubId) % 90);
   const seasonYear = parseInt(pack.season.slice(0, 4), 10) || 2025;
+  /** Pack season e.g. 2025/26 is unfinished — trophies only through the prior year. */
+  const latestCompletedYear = seasonYear - 1;
 
   const honourCount = 2 + (club.reputation >= 85 ? 3 : club.reputation >= 75 ? 2 : 1);
   const honours: string[] = [];
   const honourBag = [...HONOUR_POOL].sort(() => rng.next() - 0.5);
   for (let i = 0; i < honourCount && i < honourBag.length; i++) {
-    const year = founded + 20 + rng.int(5, Math.max(6, seasonYear - founded - 5));
+    // Previous formula could reach seasonYear+15 (e.g. «Обладатель кубка (2035)»).
+    const raw = founded + 20 + rng.int(5, Math.max(6, seasonYear - founded - 5));
+    const year = Math.max(founded + 5, Math.min(raw, latestCompletedYear));
     honours.push(`${honourBag[i]} (${year})`);
   }
 
@@ -105,8 +109,8 @@ export function buildClubHistory(pack: WorldPack, clubId: string): ClubHistory |
     const pos = positions[i]!;
     const nat = club.federationId;
     const names = rollCyrillicName(nat, `${clubId}:legend:${i}`);
-    const end = seasonYear - rng.int(3, 18);
-    const start = end - rng.int(5, 12);
+    const end = Math.min(latestCompletedYear, seasonYear - rng.int(3, 18));
+    const start = Math.max(founded, end - rng.int(5, 12));
     legends.push({
       id: `${clubId}-legend-${i}`,
       firstName: names.firstName,
@@ -125,7 +129,7 @@ export function buildClubHistory(pack: WorldPack, clubId: string): ClubHistory |
     const homeFirst = i % 2 === 0;
     const hg = rng.int(1, 4);
     const ag = rng.int(0, 3);
-    const year = seasonYear - rng.int(2, 25);
+    const year = Math.min(latestCompletedYear - 1, seasonYear - rng.int(2, 25));
     return {
       id: `${clubId}-classic-${i}`,
       season: `${year}/${String(year + 1).slice(2)}`,
