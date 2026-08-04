@@ -253,6 +253,8 @@ function migratePlayer(raw: Partial<Player>, stats: CareerSave["playerStats"]): 
       ? raw.portraitId
       : portraitIdForPlayer(nationalityId, raw.id),
     retirementAge: raw.retirementAge,
+    loan: raw.loan,
+    careerMoves: Array.isArray(raw.careerMoves) ? raw.careerMoves : undefined,
   };
   ensureRetirementAge(base);
   if (!base.height || !base.weight) {

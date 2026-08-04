@@ -173,13 +173,31 @@ export function preferredRoleLabel(player: Player): string {
   return ROLE_LABEL[primaryRole(player)];
 }
 
-export function positionLabel(player: Player): string {
-  const roles = player.roles?.length ? player.roles : [primaryRole(player)];
-  return roles.map((r) => ROLE_LABEL[r]).join("/");
+/** All known roles for lists / tactics (e.g. «ЦПЗ/ОПЗ»). */
+export function rolesLabel(player: Player): string {
+  const roles = player.roles?.length ? [...new Set(player.roles)] : [primaryRole(player)];
+  return roles.map((r) => ROLE_LABEL[r] ?? r).join("/");
 }
 
+export function positionLabel(player: Player): string {
+  return rolesLabel(player);
+}
+
+/** Plain first+last — for match commentary / news where age is noise. */
 export function playerDisplayName(player: Player): string {
   return `${player.firstName} ${player.lastName}`;
+}
+
+/** Name with age — default for lists, cards, and profile headers. */
+export function playerNameWithAge(player: Player): string {
+  return `${player.firstName} ${player.lastName}, ${player.age}`;
+}
+
+/** Average overall of players currently at the club (squad strength). */
+export function squadAverageOverall(players: Player[], clubId: string): number {
+  const squad = players.filter((p) => p.clubId === clubId);
+  if (!squad.length) return 0;
+  return Math.round(squad.reduce((sum, p) => sum + p.overall, 0) / squad.length);
 }
 
 export function clubDisplayName(club: Club): string {

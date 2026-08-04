@@ -1,14 +1,13 @@
+import { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import {
   FORMATION_COORDS,
   FORMATION_ROLES,
   FORMATIONS,
-  ROLE_LABEL,
   autoSelectLineup,
   effectiveOverall,
   mentalityLabel,
-  preferredRoleLabel,
-  primaryPosition,
+  rolesLabel,
   suggestFormations,
   type FormationId,
   type LineupContext,
@@ -39,6 +38,7 @@ export function TacticsPanel({
   lockLineup?: boolean;
   lineupContext?: LineupContext;
 }) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const byId = new Map(squad.map((p) => [p.id, p]));
   const formation = tactics?.formation ?? "4-3-3";
   const lineup = tactics?.lineup ?? [];
@@ -49,6 +49,7 @@ export function TacticsPanel({
     : suggestFormations(squad, clubId, lineupContext, 3);
 
   const setFormation = (nextFormation: FormationId) => {
+    setSelectedId(null);
     onChange({
       ...(tactics ?? { attack: 55, defence: 55, aggression: 50, formation, lineup }),
       formation: nextFormation,
@@ -58,21 +59,41 @@ export function TacticsPanel({
     });
   };
 
-  const swapWithBench = (slotIndex: number, benchId: string) => {
+  const swapPlayers = (aId: string, bId: string) => {
     if (lockLineup) return;
     const nextLineup = [...lineup];
-    const out = nextLineup[slotIndex];
-    const bi = nextLineup.indexOf(benchId);
-    if (bi >= 0) {
-      nextLineup[bi] = out;
-      nextLineup[slotIndex] = benchId;
+    const ai = nextLineup.indexOf(aId);
+    const bi = nextLineup.indexOf(bId);
+    if (ai >= 0 && bi >= 0) {
+      nextLineup[ai] = bId;
+      nextLineup[bi] = aId;
+    } else if (ai >= 0) {
+      nextLineup[ai] = bId;
+    } else if (bi >= 0) {
+      nextLineup[bi] = aId;
     } else {
-      nextLineup[slotIndex] = benchId;
+      // Two bench players — no lineup change
+      setSelectedId(null);
+      return;
     }
     onChange({
       ...(tactics ?? { attack: 55, defence: 55, aggression: 50, formation, lineup }),
       lineup: nextLineup,
     });
+    setSelectedId(null);
+  };
+
+  const onTapPlayer = (id: string) => {
+    if (lockLineup) return;
+    if (!selectedId) {
+      setSelectedId(id);
+      return;
+    }
+    if (selectedId === id) {
+      setSelectedId(null);
+      return;
+    }
+    swapPlayers(selectedId, id);
   };
 
   const bench = squad
@@ -151,12 +172,16 @@ export function TacticsPanel({
           const eff = effectiveOverall(p, role);
           const outOfPos = eff < p.overall;
           const avatar = compact ? 24 : 28;
+          const selected = selectedId === id;
           return (
-            <View
+            <Pressable
               key={`${id}-${i}`}
+              disabled={lockLineup}
+              onPress={() => onTapPlayer(id)}
               style={[
                 styles.pitchPlayer,
                 compact && styles.pitchPlayerCompact,
+                selected && styles.pitchPlayerSelected,
                 {
                   left: `${c.x}%`,
                   top: `${c.y}%`,
@@ -177,11 +202,12 @@ export function TacticsPanel({
                   <Text style={styles.pitchOvrBadgeText}>{eff}</Text>
                 </View>
               </View>
-              <Text style={styles.pitchCaption} numberOfLines={1}>
+              <Text style={styles.pitchCaption} numberOfLines={2}>
                 <Text style={styles.pitchName}>{p.lastName}</Text>
-                <Text style={styles.pitchPos}> · {ROLE_LABEL[role] ?? role}</Text>
+                {"\n"}
+                <Text style={styles.pitchPos}>{rolesLabel(p)}</Text>
               </Text>
-            </View>
+            </Pressable>
           );
         })}
       </View>
@@ -196,37 +222,23 @@ export function TacticsPanel({
       ) : null}
 
       <Text style={styles.section}>
-        {lockLineup ? "Запас (замены — во вкладке Замены)" : "Запас (тап — в основу)"}
+        {lockLineup
+          ? "Запас (замены — во вкладке Замены)"
+          : selectedId
+            ? "Выберите второго игрока для обмена"
+            : "Запас (тап — выбрать, затем обмен)"}
       </Text>
       <View style={styles.benchRow}>
         {bench.slice(0, compact ? 8 : 12).map((p) => {
           const role = p.preferredRole ?? "CM";
           const eff = effectiveOverall(p, role);
+          const selected = selectedId === p.id;
           return (
             <Pressable
               key={p.id}
-              style={styles.benchItem}
+              style={[styles.benchItem, selected && styles.benchItemSelected]}
               disabled={lockLineup}
-              onPress={() => {
-                if (lockLineup) return;
-                const outIdx = lineup
-                  .map((id, idx) => ({
-                    id,
-                    idx,
-                    ovr: (() => {
-                      const onPitch = byId.get(id);
-                      if (!onPitch) return 0;
-                      return effectiveOverall(onPitch, slots[idx] ?? "CM");
-                    })(),
-                  }))
-                  .filter((x) => {
-                    const onPitch = byId.get(x.id);
-                    if (!onPitch) return false;
-                    return primaryPosition(onPitch) !== "GK" || primaryPosition(p) === "GK";
-                  })
-                  .sort((a, b) => a.ovr - b.ovr)[0]?.idx;
-                if (outIdx != null) swapWithBench(outIdx, p.id);
-              }}
+              onPress={() => onTapPlayer(p.id)}
             >
               <PersonPortrait
                 seed={p.id}
@@ -237,7 +249,9 @@ export function TacticsPanel({
                 portraitId={p.portraitId}
                 nationalityId={p.nationalityId}
               />
-              <Text style={styles.benchPos}>{preferredRoleLabel(p)}</Text>
+              <Text style={styles.benchPos} numberOfLines={1}>
+                {rolesLabel(p)}
+              </Text>
               <Text style={styles.benchText} numberOfLines={1}>
                 {p.lastName}
               </Text>
@@ -248,7 +262,7 @@ export function TacticsPanel({
       </View>
       {!lockLineup ? (
         <Text style={styles.hint}>
-          Сила на позиции учитывает роль и ногу. Неродная позиция — ниже рейтинг.
+          Тап по игроку на поле или скамейке — выбор, второй тап — обмен. Сила учитывает роль и ногу.
         </Text>
       ) : null}
     </View>
@@ -300,14 +314,21 @@ const styles = StyleSheet.create({
   pitchCompact: { height: 300 },
   pitchPlayer: {
     position: "absolute",
-    width: 68,
-    marginLeft: -34,
+    width: 72,
+    marginLeft: -36,
     marginTop: -2,
     alignItems: "center",
+    paddingVertical: 2,
+    borderRadius: 4,
   },
   pitchPlayerCompact: {
-    width: 60,
-    marginLeft: -30,
+    width: 64,
+    marginLeft: -32,
+  },
+  pitchPlayerSelected: {
+    backgroundColor: "rgba(198, 167, 94, 0.28)",
+    borderWidth: 1,
+    borderColor: "#C6A75E",
   },
   pitchAvatarWrap: {
     position: "relative",
@@ -329,7 +350,7 @@ const styles = StyleSheet.create({
   pitchOvrBadgeText: { color: "#E8F0EA", fontSize: 8, fontWeight: "800" },
   pitchCaption: {
     marginTop: 3,
-    maxWidth: 66,
+    maxWidth: 70,
     textAlign: "center",
     lineHeight: 11,
   },
@@ -337,11 +358,16 @@ const styles = StyleSheet.create({
     color: "#E8F0EA",
     fontSize: 8,
   },
-  pitchPos: { color: "#C6A75E", fontSize: 8 },
+  pitchPos: { color: "#C6A75E", fontSize: 7 },
   warn: { color: "#E67E22", fontSize: 11, marginBottom: 8, lineHeight: 15 },
   benchRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  benchItem: { width: 68, alignItems: "center" },
-  benchPos: { color: "#C6A75E", fontSize: 9, marginTop: 2 },
+  benchItem: { width: 72, alignItems: "center", paddingVertical: 4, borderRadius: 4 },
+  benchItemSelected: {
+    backgroundColor: "rgba(198, 167, 94, 0.28)",
+    borderWidth: 1,
+    borderColor: "#C6A75E",
+  },
+  benchPos: { color: "#C6A75E", fontSize: 8, marginTop: 2, textAlign: "center" },
   benchText: { color: "#8FA396", fontSize: 9 },
   benchOvr: { color: "#E8F0EA", fontSize: 11, fontWeight: "700" },
   hint: { color: "#5F7A6C", fontSize: 11, marginTop: 8 },

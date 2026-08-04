@@ -1,8 +1,9 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
+  FlatList,
+  InteractionManager,
   Modal,
   Pressable,
   ScrollView,
@@ -10,6 +11,7 @@ import {
   Text,
   View,
 } from "react-native";
+import { useEffect, useMemo, useRef, useState, useTransition, type ReactNode } from "react";
 import {
   advanceUntilMatchday,
   advanceLiveMatch,
@@ -35,6 +37,7 @@ import {
   FOOT_LABEL,
   formatAttendance,
   attendanceFillPct,
+  generateWorldPlayers,
   getActiveTransferWindow,
   getBuyNegotiation,
   getNextTransferWindow,
@@ -42,6 +45,7 @@ import {
   swapCreditForPlayers,
   groupFixturesByDate,
   hasContinentalAccess,
+  isBigTransfer,
   uefaRanking,
   leagueTableEuroZones,
   zoneForPlace,
@@ -76,15 +80,17 @@ import {
   normalizeCareerSave,
   nationalityShort,
   playerDisplayName,
+  playerNameWithAge,
   POSITION_LABEL,
   primaryPosition,
-  preferredRoleLabel,
   positionLabel,
+  rolesLabel,
   raiseBuyOffer,
   Rng,
   seasonIsReadyToAward,
   sellPlayer,
   sortSquad,
+  squadAverageOverall,
   summarizeMatch,
   suggestAutoSubstitutions,
   topStrengths,
@@ -187,7 +193,9 @@ export default function App() {
     playerId: string;
     offer: number;
     feedback?: string;
+    feedbackKind?: "info" | "reject" | "accept" | "error";
     swapIds: string[];
+    lastVerdict?: "reject" | "insult" | "cap" | "accept";
   }>(null);
 
   const startBuyDeal = (playerId: string) => {
@@ -201,7 +209,8 @@ export default function App() {
       playerId,
       offer: neg.marketValue,
       swapIds: [],
-      feedback: `Рыночная оценка ${formatMarketValue(neg.marketValue)}. Можно предложить своих игроков в обмен и снизить кэш. Обычно потолок торга ~${formatMarketValue(neg.hardCeil)}.`,
+      feedbackKind: "info",
+      feedback: `Рыночная оценка ${formatMarketValue(neg.marketValue)}. Обычно клуб просит больше — повышайте кэш или добавьте обмен. Потолок торга ~${formatMarketValue(neg.hardCeil)}.`,
     });
   };
 
@@ -214,19 +223,32 @@ export default function App() {
         offer={buyDeal.offer}
         swapIds={buyDeal.swapIds}
         feedback={buyDeal.feedback}
-        onChangeOffer={(offer, feedback, swapIds) =>
+        feedbackKind={buyDeal.feedbackKind}
+        lastVerdict={buyDeal.lastVerdict}
+        onChangeOffer={(offer, feedback, swapIds, meta) =>
           setBuyDeal({
             playerId: buyDeal.playerId,
             offer,
             feedback,
+            feedbackKind: meta?.feedbackKind ?? "info",
+            lastVerdict: meta?.lastVerdict,
             swapIds: swapIds ?? buyDeal.swapIds,
           })
         }
         onClose={() => setBuyDeal(null)}
-        onBought={(next) => {
+        onBought={(next, detail) => {
           setSave(next);
           setBuyDeal(null);
           setScreen({ name: "transfers" });
+          const feeText = detail.fee != null ? formatMarketValue(detail.fee) : "—";
+          const before =
+            detail.budgetBefore != null ? formatMarketValue(detail.budgetBefore) : "—";
+          const after =
+            detail.budgetAfter != null ? formatMarketValue(detail.budgetAfter) : "—";
+          Alert.alert(
+            "Сделка закрыта",
+            `Игрок куплен за ${feeText}.\nБюджет: ${before} → ${after}.`
+          );
         }}
       />
     ) : null;
@@ -293,6 +315,16 @@ export default function App() {
       ),
     [selectedLeague]
   );
+
+  /** Preview squads for club select (same seed as createCareer). */
+  const previewPlayers = useMemo(() => generateWorldPlayers(pack, 2026), []);
+  const clubSquadOvr = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of pack.clubs) {
+      m.set(c.id, squadAverageOverall(previewPlayers, c.id));
+    }
+    return m;
+  }, [previewPlayers]);
 
   const startCareer = (club: Club) => {
     setSave(createCareer(pack, club.id, "Менеджер", 2026));
@@ -512,7 +544,7 @@ export default function App() {
         transferActions.push({
           label: `Аренда за ${formatMarketValue(loanVerdict.fee)}`,
           confirmTitle: "Взять в аренду?",
-          confirmBody: `${playerDisplayName(player)}\n${loanVerdict.message}\nБюджет после: ${formatMarketValue(budget - loanVerdict.fee)}`,
+          confirmBody: `${playerNameWithAge(player)}\n${loanVerdict.message}\nБюджет после: ${formatMarketValue(budget - loanVerdict.fee)}`,
           onConfirm: () => {
             const result = loanPlayer(pack, save, player.id);
             if (!result.ok) {
@@ -529,7 +561,7 @@ export default function App() {
       transferActions.push({
         label: `Продать за ${formatMarketValue(fee)}`,
         confirmTitle: "Продать игрока?",
-        confirmBody: `${playerDisplayName(player)}\nВы получите: ${formatMarketValue(fee)}\nИгрок уйдёт из клуба без возможности отмены.`,
+        confirmBody: `${playerNameWithAge(player)}\nВы получите: ${formatMarketValue(fee)}\nИгрок уйдёт из клуба без возможности отмены.`,
         destructive: true,
         onConfirm: () => {
           const result = sellPlayer(pack, save, player.id);
@@ -546,7 +578,7 @@ export default function App() {
         transferActions.push({
           label: `Отдать в аренду · ${formatMarketValue(outInterest.fee)}`,
           confirmTitle: "Отдать в аренду?",
-          confirmBody: `${playerDisplayName(player)}\n${outInterest.message}\nВ аренде игрок получит практику и может вырасти быстрее, чем на лавке.`,
+          confirmBody: `${playerNameWithAge(player)}\n${outInterest.message}\nВ аренде игрок получит практику и может вырасти быстрее, чем на лавке.`,
           onConfirm: () => {
             const result = loanOutPlayer(pack, save, player.id);
             if (!result.ok) {
@@ -574,6 +606,8 @@ export default function App() {
           setScreen(fromTransfers ? { name: "transfers" } : { name: "squad", clubId: screen.clubId })
         }
         transferActions={transferActions}
+        transferLog={save.transferLog}
+        clubsById={new Map(pack.clubs.map((c) => [c.id, c]))}
       />
     );
   }
@@ -728,8 +762,11 @@ export default function App() {
               <Text style={styles.clubCity}>
                 {club.city} · {club.vibe}
               </Text>
+              <Text style={styles.clubCity}>
+                Состав ~{clubSquadOvr.get(club.id) ?? "—"} · престиж {club.reputation}
+              </Text>
             </View>
-            <Text style={styles.rep}>{club.reputation}</Text>
+            <Text style={styles.rep}>{clubSquadOvr.get(club.id) ?? "—"}</Text>
           </Pressable>
         ))}
       </ScrollView>
@@ -800,6 +837,9 @@ function CareerScreen({
           <Text style={styles.brandSmall}>{club.name}</Text>
           <Text style={styles.sub}>
             {club.city} · {save.currentDate} · евро: {euro ? "да" : "нет"}
+          </Text>
+          <Text style={styles.sub}>
+            Состав ~{squadAverageOverall(save.players, club.id)} · престиж {club.reputation}
           </Text>
           <Text style={styles.sub}>Бюджет: {formatMarketValue(budget)}</Text>
           <Text style={styles.hint}>
@@ -1151,7 +1191,7 @@ function Leaderboard({
             <ClubLogo club={c} size={18} />
             <View style={{ flex: 1, minWidth: 0 }}>
               <Text style={[styles.tableClub, { marginLeft: 0 }]} numberOfLines={1}>
-                {playerDisplayName(p)}
+                {playerNameWithAge(p)}
               </Text>
               <Text style={styles.statNat} numberOfLines={1}>
                 {nationalityShort(p.nationalityId)}
@@ -1236,13 +1276,14 @@ function PreMatchScreen({
     } else if (bi >= 0) {
       next[bi] = a;
     } else {
+      setSelectedId(null);
       return;
     }
     applyTactics({ ...tactics, lineup: next.slice(0, 11) });
     setSelectedId(null);
   };
 
-  const onTapMine = (id: string, inXi: boolean) => {
+  const onTapMine = (id: string) => {
     if (!selectedId) {
       setSelectedId(id);
       return;
@@ -1251,12 +1292,7 @@ function PreMatchScreen({
       setSelectedId(null);
       return;
     }
-    const selInXi = myIds.includes(selectedId);
-    if (selInXi !== inXi) {
-      swapPlayers(selectedId, id);
-    } else {
-      setSelectedId(id);
-    }
+    swapPlayers(selectedId, id);
   };
 
   const renderPlayerRow = (
@@ -1281,8 +1317,8 @@ function PreMatchScreen({
           portraitId={p.portraitId}
           nationalityId={p.nationalityId}
         />
-        <Text style={[styles.prePos, opts.compact && styles.prePosSm]}>
-          {preferredRoleLabel(p)}
+        <Text style={[styles.prePos, opts.compact && styles.prePosSm]} numberOfLines={1}>
+          {rolesLabel(p)}
         </Text>
         <Text style={[styles.preName, opts.compact && styles.preNameSm]} numberOfLines={1}>
           {p.lastName}
@@ -1321,10 +1357,12 @@ function PreMatchScreen({
           jersey: userClub.colors[0],
           jerseySecondary: userClub.colors[1],
           selected: selectedId === id,
-          onPress: () => onTapMine(id, true),
+          onPress: () => onTapMine(id),
         });
       })}
-      <Text style={[styles.preSub, { marginTop: 10 }]}>Запас</Text>
+      <Text style={[styles.preSub, { marginTop: 10 }]}>
+        {selectedId ? "Тапните второго для обмена" : "Запас"}
+      </Text>
       {myBench.slice(0, 9).map((id) => {
         const p = save.players.find((x) => x.id === id);
         if (!p) return null;
@@ -1333,7 +1371,7 @@ function PreMatchScreen({
           jerseySecondary: userClub.colors[1],
           compact: true,
           selected: selectedId === id,
-          onPress: () => onTapMine(id, false),
+          onPress: () => onTapMine(id),
         });
       })}
     </View>
@@ -1997,9 +2035,9 @@ function LiveMatchScreen({
               portraitId={p.portraitId}
               nationalityId={p.nationalityId}
             />
-                  <Text style={[styles.posBadge, { width: 40 }]}>{preferredRoleLabel(p)}</Text>
+                  <Text style={[styles.posBadge, { width: 64 }]}>{rolesLabel(p)}</Text>
                   <Text style={styles.tableClub} numberOfLines={1}>
-                    {playerDisplayName(p)}
+                    {playerNameWithAge(p)}
                   </Text>
                   <Text
                     style={[
@@ -2350,9 +2388,9 @@ function SubPicker({
               portraitId={p.portraitId}
               nationalityId={p.nationalityId}
             />
-            <Text style={[styles.posBadge, { width: 40 }]}>{preferredRoleLabel(p)}</Text>
+            <Text style={[styles.posBadge, { width: 64 }]}>{rolesLabel(p)}</Text>
             <Text style={styles.tableClub} numberOfLines={1}>
-              {playerDisplayName(p)}
+              {playerNameWithAge(p)}
             </Text>
             <Text style={styles.pts}>{eff}</Text>
           </Pressable>
@@ -2465,10 +2503,10 @@ function SquadScreen({
                     portraitId={p.portraitId}
                     nationalityId={p.nationalityId}
                   />
-                  <Text style={[styles.posBadge, { width: 40 }]}>{preferredRoleLabel(p)}</Text>
+                  <Text style={[styles.posBadge, { width: 64 }]}>{rolesLabel(p)}</Text>
                   <View style={styles.clubMeta}>
                     <Text style={styles.clubName}>
-                      {playerDisplayName(p)}
+                      {playerNameWithAge(p)}
                       {p.loan ? " · аренда" : ""}
                       {isLastCareerSeason(p) ? " · последний сезон" : ""}
                     </Text>
@@ -2596,6 +2634,8 @@ function PlayerScreen({
   onBack,
   backLabel = "← состав",
   transferActions,
+  transferLog,
+  clubsById,
 }: {
   player: Player;
   club?: Club;
@@ -2614,6 +2654,8 @@ function PlayerScreen({
     onConfirm?: () => void;
     onPress?: () => void;
   }[];
+  transferLog?: CareerSave["transferLog"];
+  clubsById?: Map<string, Club>;
 }) {
   const keys = keyAttributes(player);
   const keySet = new Set(keys);
@@ -2639,6 +2681,22 @@ function PlayerScreen({
     onConfirm?: () => void;
   }>(null);
 
+  const moveHistory = useMemo(() => {
+    const fromPlayer = player.careerMoves ?? [];
+    if (fromPlayer.length) return fromPlayer;
+    return (transferLog ?? [])
+      .filter((d) => d.playerId === player.id)
+      .map((d) => ({
+        date: d.date,
+        kind: d.kind as "permanent" | "loan" | "loan_return",
+        fromClubId: d.fromClubId,
+        toClubId: d.toClubId,
+        fee: d.fee,
+        fromClubName: clubsById?.get(d.fromClubId)?.shortName,
+        toClubName: clubsById?.get(d.toClubId)?.shortName,
+      }));
+  }, [player.careerMoves, player.id, transferLog, clubsById]);
+
   return (
     <View style={styles.root}>
       <Pressable onPress={onBack}>
@@ -2651,9 +2709,9 @@ function PlayerScreen({
           nationalityId={player.nationalityId}
         />
         <View style={{ flex: 1 }}>
-          <Text style={styles.brandSmall}>{playerDisplayName(player)}</Text>
+          <Text style={styles.brandSmall}>{playerNameWithAge(player)}</Text>
           <Text style={styles.sub}>
-            {positionLabel(player)} · {player.overall} · пот. {player.potential} · {player.age} лет
+            {positionLabel(player)} · {player.overall} · пот. {player.potential}
           </Text>
           {isLastCareerSeason(player) ? (
             <Text style={styles.lastSeasonBanner}>
@@ -2686,6 +2744,31 @@ function PlayerScreen({
         ))}
       </View>
       <ScrollView>
+        <Text style={styles.section}>История переходов</Text>
+        {moveHistory.length === 0 ? (
+          <Text style={styles.sub}>Пока нет зафиксированных трансферов или аренд.</Text>
+        ) : (
+          moveHistory.slice(0, 12).map((m, i) => {
+            const kindLabel =
+              m.kind === "loan"
+                ? "Аренда"
+                : m.kind === "loan_return"
+                  ? "Возврат"
+                  : "Трансфер";
+            const from =
+              m.fromClubName ?? clubsById?.get(m.fromClubId)?.shortName ?? m.fromClubId;
+            const to = m.toClubName ?? clubsById?.get(m.toClubId)?.shortName ?? m.toClubId;
+            return (
+              <View key={`${m.date}-${m.fromClubId}-${m.toClubId}-${i}`} style={styles.moveRow}>
+                <Text style={styles.moveDate}>{m.date}</Text>
+                <Text style={styles.moveBody}>
+                  {kindLabel}: «{from}» → «{to}»
+                  {m.fee > 0 ? ` · ${formatMarketValue(m.fee)}` : ""}
+                </Text>
+              </View>
+            );
+          })
+        )}
         <ValueHistoryChart
           title="Стоимость за карьеру"
           points={careerHistory}
@@ -2843,6 +2926,8 @@ function BuyNegotiationModal({
   offer,
   swapIds,
   feedback,
+  feedbackKind = "info",
+  lastVerdict,
   onChangeOffer,
   onClose,
   onBought,
@@ -2853,9 +2938,22 @@ function BuyNegotiationModal({
   offer: number;
   swapIds: string[];
   feedback?: string;
-  onChangeOffer: (offer: number, feedback?: string, swapIds?: string[]) => void;
+  feedbackKind?: "info" | "reject" | "accept" | "error";
+  lastVerdict?: "reject" | "insult" | "cap" | "accept";
+  onChangeOffer: (
+    offer: number,
+    feedback?: string,
+    swapIds?: string[],
+    meta?: {
+      feedbackKind?: "info" | "reject" | "accept" | "error";
+      lastVerdict?: "reject" | "insult" | "cap" | "accept";
+    }
+  ) => void;
   onClose: () => void;
-  onBought: (save: CareerSave) => void;
+  onBought: (
+    save: CareerSave,
+    detail: { fee?: number; budgetBefore?: number; budgetAfter?: number }
+  ) => void;
 }) {
   const player = save.players.find((p) => p.id === playerId);
   const neg = getBuyNegotiation(pack, save, playerId);
@@ -2887,6 +2985,8 @@ function BuyNegotiationModal({
   const canAfford = budget >= offer;
   const atCeil = offer >= neg.hardCeil - 0.05;
   const packageValue = Math.round((offer + swapCredit) * 10) / 10;
+  const rejected =
+    lastVerdict === "reject" || lastVerdict === "insult" || lastVerdict === "cap";
 
   const toggleSwap = (id: string) => {
     let next = swapIds.includes(id) ? swapIds.filter((x) => x !== id) : [...swapIds, id];
@@ -2901,27 +3001,108 @@ function BuyNegotiationModal({
       selected.length
         ? `В обмен: ${selected.map((p) => p.lastName).join(", ")} (−${formatMarketValue(credit)} к кэшу).`
         : "Обмен убран — снова чисто денежное предложение.",
-      next
+      next,
+      { feedbackKind: "info", lastVerdict: undefined }
+    );
+  };
+
+  const bumpAndNote = (step: "small" | "medium" | "large", note: string) => {
+    onChangeOffer(
+      raiseBuyOffer(offer, neg.marketValue, neg.hardCeil, step),
+      note,
+      swapIds,
+      { feedbackKind: "info", lastVerdict: undefined }
     );
   };
 
   const submit = () => {
     if (!canAfford) {
-      onChangeOffer(offer, `Недостаточно бюджета (есть ${formatMarketValue(budget)}).`, swapIds);
+      onChangeOffer(
+        offer,
+        `Отказ клуба не требуется: у вас не хватает бюджета (есть ${formatMarketValue(budget)}, нужно ${formatMarketValue(offer)}).`,
+        swapIds,
+        { feedbackKind: "error", lastVerdict: undefined }
+      );
       return;
     }
     const verdict = evaluateBuyOffer(neg, offer, { pack, save, swapPlayers });
     if (verdict.status !== "accept") {
-      onChangeOffer(offer, verdict.message, swapIds);
+      const label =
+        verdict.status === "insult"
+          ? "Клуб оскорблён предложением"
+          : verdict.status === "cap"
+            ? "Слишком завышенная сумма"
+            : "Клуб отклонил предложение";
+      onChangeOffer(
+        offer,
+        `${label}.\n${verdict.message}\n\nПовысьте кэш (+5% / +10% / +20%) или усильте обмен, затем предложите снова.`,
+        swapIds,
+        { feedbackKind: "reject", lastVerdict: verdict.status }
+      );
       return;
     }
     const result = buyPlayer(pack, save, playerId, offer, swapIds);
     if (!result.ok) {
-      onChangeOffer(offer, result.error ?? "Сделка не состоялась.", swapIds);
+      onChangeOffer(offer, result.error ?? "Сделка не состоялась.", swapIds, {
+        feedbackKind: "error",
+        lastVerdict: undefined,
+      });
       return;
     }
-    onBought(result.save);
+    onBought(result.save, {
+      fee: result.fee,
+      budgetBefore: result.budgetBefore,
+      budgetAfter: result.budgetAfter,
+    });
   };
+
+  const primaryLabel = !canAfford
+    ? "Не хватает бюджета"
+    : rejected
+      ? "Повысить и предложить снова"
+      : `Отправить предложение · ${formatMarketValue(offer)}`;
+
+  const onPrimary = () => {
+    if (!canAfford) {
+      submit();
+      return;
+    }
+    if (rejected) {
+      const nextOffer = raiseBuyOffer(offer, neg.marketValue, neg.hardCeil, "medium");
+      const verdict = evaluateBuyOffer(neg, nextOffer, { pack, save, swapPlayers });
+      if (verdict.status !== "accept") {
+        onChangeOffer(
+          nextOffer,
+          `Клуб снова отклонил.\n${verdict.message}\n\nТекущее предложение: ${formatMarketValue(nextOffer)}. Добавьте ещё кэша или обмен.`,
+          swapIds,
+          { feedbackKind: "reject", lastVerdict: verdict.status }
+        );
+        return;
+      }
+      const result = buyPlayer(pack, save, playerId, nextOffer, swapIds);
+      if (!result.ok) {
+        onChangeOffer(nextOffer, result.error ?? "Сделка не состоялась.", swapIds, {
+          feedbackKind: "error",
+          lastVerdict: undefined,
+        });
+        return;
+      }
+      onBought(result.save, {
+        fee: result.fee,
+        budgetBefore: result.budgetBefore,
+        budgetAfter: result.budgetAfter,
+      });
+      return;
+    }
+    submit();
+  };
+
+  const feedbackStyle =
+    feedbackKind === "reject" || feedbackKind === "error"
+      ? styles.negoFeedbackReject
+      : feedbackKind === "accept"
+        ? styles.negoFeedbackAccept
+        : styles.negoFeedback;
 
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
@@ -2930,17 +3111,31 @@ function BuyNegotiationModal({
           <Text style={styles.dialogTitle}>Торг за игрока</Text>
           <ScrollView style={{ maxHeight: 420 }} keyboardShouldPersistTaps="handled">
             <Text style={styles.dialogBody}>
-              {playerDisplayName(player)}
+              {playerNameWithAge(player)}
               {from ? ` («${from.name}»)` : ""}
               {"\n"}Рынок: {formatMarketValue(neg.marketValue)} · потолок кэша ~{formatMarketValue(neg.hardCeil)}
-              {"\n"}Кэш: {formatMarketValue(offer)}
+              {"\n"}Ваше предложение (кэш): {formatMarketValue(offer)}
               {swapPlayers.length
                 ? `\nОбмен: ${swapPlayers.map((p) => p.lastName).join(", ")} (~${formatMarketValue(swapCredit)})`
                 : ""}
               {"\n"}Пакет ≈ {formatMarketValue(packageValue)}
-              {"\n"}Бюджет: {formatMarketValue(budget)}
+              {"\n"}Ваш бюджет: {formatMarketValue(budget)}
+              {canAfford
+                ? `\nПосле сделки останется ≈ ${formatMarketValue(budget - offer)}`
+                : "\n⚠ Недостаточно средств на это предложение"}
             </Text>
-            {feedback ? <Text style={styles.negoFeedback}>{feedback}</Text> : null}
+            {feedback ? (
+              <View
+                style={[
+                  styles.negoSellerBox,
+                  (feedbackKind === "reject" || feedbackKind === "error") &&
+                    styles.negoSellerBoxReject,
+                ]}
+              >
+                <Text style={styles.negoSellerLabel}>Ответ продавца</Text>
+                <Text style={feedbackStyle}>{feedback}</Text>
+              </View>
+            ) : null}
 
             <Text style={[styles.needsTitle, { marginTop: 10 }]}>Игроки в обмен (до 2)</Text>
             <Text style={styles.hint}>Отметьте своих — кэш предложения пересчитается.</Text>
@@ -2963,10 +3158,10 @@ function BuyNegotiationModal({
                   />
                   <View style={{ flex: 1 }}>
                     <Text style={styles.clubName} numberOfLines={1}>
-                      {playerDisplayName(p)}
+                      {playerNameWithAge(p)}
                     </Text>
                     <Text style={styles.clubCity}>
-                      {preferredRoleLabel(p)} · {p.overall} · {formatMarketValue(p.marketValue)}
+                      {rolesLabel(p)} · {p.overall} · {formatMarketValue(p.marketValue)}
                     </Text>
                   </View>
                   <Text style={on ? styles.swapCheckOn : styles.swapCheck}>{on ? "✓" : "+"}</Text>
@@ -2974,43 +3169,26 @@ function BuyNegotiationModal({
               );
             })}
 
+            <Text style={[styles.needsTitle, { marginTop: 10 }]}>Повысить кэш</Text>
             <View style={styles.negoRaiseRow}>
               <Pressable
                 style={[styles.negoRaiseBtn, atCeil && { opacity: 0.4 }]}
                 disabled={atCeil}
-                onPress={() =>
-                  onChangeOffer(
-                    raiseBuyOffer(offer, neg.marketValue, neg.hardCeil, "small"),
-                    "Повысили кэш на ~5%.",
-                    swapIds
-                  )
-                }
+                onPress={() => bumpAndNote("small", "Повысили кэш на ~5%. Можно снова отправить предложение.")}
               >
                 <Text style={styles.negoRaiseText}>+5%</Text>
               </Pressable>
               <Pressable
                 style={[styles.negoRaiseBtn, atCeil && { opacity: 0.4 }]}
                 disabled={atCeil}
-                onPress={() =>
-                  onChangeOffer(
-                    raiseBuyOffer(offer, neg.marketValue, neg.hardCeil, "medium"),
-                    "Повысили кэш на ~10%.",
-                    swapIds
-                  )
-                }
+                onPress={() => bumpAndNote("medium", "Повысили кэш на ~10%. Можно снова отправить предложение.")}
               >
                 <Text style={styles.negoRaiseText}>+10%</Text>
               </Pressable>
               <Pressable
                 style={[styles.negoRaiseBtn, atCeil && { opacity: 0.4 }]}
                 disabled={atCeil}
-                onPress={() =>
-                  onChangeOffer(
-                    raiseBuyOffer(offer, neg.marketValue, neg.hardCeil, "large"),
-                    "Крупная прибавка кэша.",
-                    swapIds
-                  )
-                }
+                onPress={() => bumpAndNote("large", "Крупная прибавка кэша. Можно снова отправить предложение.")}
               >
                 <Text style={styles.negoRaiseText}>+20%</Text>
               </Pressable>
@@ -3022,9 +3200,11 @@ function BuyNegotiationModal({
             </Pressable>
             <Pressable
               style={[styles.dialogBtnMain, !canAfford && { opacity: 0.45 }]}
-              onPress={submit}
+              onPress={onPrimary}
             >
-              <Text style={styles.dialogBtnMainText}>Предложить</Text>
+              <Text style={styles.dialogBtnMainText} numberOfLines={2}>
+                {primaryLabel}
+              </Text>
             </Pressable>
           </View>
         </View>
@@ -3106,6 +3286,8 @@ function TransfersScreen({
   const [posFilter, setPosFilter] = useState<Position | "all">("all");
   const [sortBy, setSortBy] = useState<"rating" | "value">("value");
   const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
+  const [listsReady, setListsReady] = useState(false);
+  const [, startTransition] = useTransition();
   const [dialog, setDialog] = useState<
     | null
     | {
@@ -3116,22 +3298,50 @@ function TransfersScreen({
         onConfirm?: () => void;
       }
   >(null);
+
+  useEffect(() => {
+    setListsReady(false);
+    const task = InteractionManager.runAfterInteractions(() => {
+      startTransition(() => setListsReady(true));
+    });
+    return () => task.cancel();
+  }, [tab, save.id]);
+
   const open = isTransferWindowOpen(save);
   const active = getActiveTransferWindow(save);
   const next = getNextTransferWindow(save);
   const budget = clubBudget(save, save.clubId);
   const club = pack.clubs.find((c) => c.id === save.clubId)!;
+  const clubsById = useMemo(() => new Map(pack.clubs.map((c) => [c.id, c])), [pack.clubs]);
+  const leagueByClubId = useMemo(() => {
+    const m = new Map<string, (typeof pack.leagues)[0]>();
+    for (const league of pack.leagues) {
+      for (const id of league.clubIds) m.set(id, league);
+    }
+    return m;
+  }, [pack.leagues]);
+
+  const windowDeals = useMemo(() => {
+    const log = save.transferLog ?? [];
+    if (!active) return log.slice(0, 24);
+    return log.filter(
+      (d) =>
+        d.windowId === active.id || (d.date >= active.from && d.date <= active.to)
+    );
+  }, [save.transferLog, active]);
+
   const targets = useMemo(
-    () => listTransferTargets(pack, save, { leagueOnly: false, limit: 120 }),
-    [pack, save]
+    () =>
+      listsReady ? listTransferTargets(pack, save, { leagueOnly: false, limit: 80 }) : [],
+    [pack, save, listsReady]
   );
   const loanTargets = useMemo(
-    () => (tab === "loan" ? listLoanTargets(pack, save, { limit: 80 }) : []),
-    [pack, save, tab]
+    () => (listsReady && tab === "loan" ? listLoanTargets(pack, save, { limit: 60 }) : []),
+    [pack, save, tab, listsReady]
   );
   const loanOutCandidates = useMemo(
-    () => (tab === "loanOut" ? listLoanOutCandidates(pack, save) : []),
-    [pack, save, tab]
+    () => (listsReady && tab === "loanOut" ? listLoanOutCandidates(pack, save) : []),
+    [pack, save, tab, listsReady]
   );
   const needs = useMemo(
     () => analyzeSquadNeeds(save.players, save.clubId, save.userTactics),
@@ -3204,6 +3414,15 @@ function TransfersScreen({
     });
   }, [loanOutCandidates, posFilter, sortBy, sortDir]);
 
+  const loanOutMeta = useMemo(() => {
+    if (tab !== "loanOut" || !listsReady) return new Map<string, ReturnType<typeof evaluateLoanInterest>>();
+    const m = new Map<string, ReturnType<typeof evaluateLoanInterest>>();
+    for (const p of loanOutList) {
+      m.set(p.id, evaluateLoanInterest(pack, save, p.id));
+    }
+    return m;
+  }, [tab, listsReady, loanOutList, pack, save]);
+
   const toggleSort = (key: "rating" | "value") => {
     if (sortBy === key) setSortDir((d) => (d === "desc" ? "asc" : "desc"));
     else {
@@ -3227,7 +3446,7 @@ function TransfersScreen({
     }
     setDialog({
       title: "Взять в аренду?",
-      body: `${playerDisplayName(p)}${from ? ` («${from.shortName}»)` : ""}\nАренда до конца сезона\nСтоимость: ${formatMarketValue(verdict.fee)}\nБюджет после: ${formatMarketValue(budget - verdict.fee)}\n\n${verdict.message}`,
+      body: `${playerNameWithAge(p)}${from ? ` («${from.shortName}»)` : ""}\nАренда до конца сезона\nСтоимость: ${formatMarketValue(verdict.fee)}\nБюджет после: ${formatMarketValue(budget - verdict.fee)}\n\n${verdict.message}`,
       confirmLabel: "Арендовать",
       onConfirm: () => {
         const result = loanPlayer(pack, save, playerId);
@@ -3251,7 +3470,7 @@ function TransfersScreen({
     }
     setDialog({
       title: "Отдать в аренду?",
-      body: `${playerDisplayName(p)}\n${interest.message}\nВы получите: ${formatMarketValue(interest.fee)}\nБюджет после: ${formatMarketValue(budget + interest.fee)}\n\nВ аренде игрок будет играть и может вырасти быстрее, чем на вашей лавке.`,
+      body: `${playerNameWithAge(p)}\n${interest.message}\nВы получите: ${formatMarketValue(interest.fee)}\nБюджет после: ${formatMarketValue(budget + interest.fee)}\n\nВ аренде игрок будет играть и может вырасти быстрее, чем на вашей лавке.`,
       confirmLabel: "Отдать",
       onConfirm: () => {
         const result = loanOutPlayer(pack, save, playerId);
@@ -3273,7 +3492,7 @@ function TransfersScreen({
       : "";
     setDialog({
       title: "Продать игрока?",
-      body: `${playerDisplayName(p)}\nВы получите: ${formatMarketValue(p.marketValue)}\nИгрок уйдёт из клуба без возможности отмены.${lastNote}`,
+      body: `${playerNameWithAge(p)}\nВы получите: ${formatMarketValue(p.marketValue)}\nИгрок уйдёт из клуба без возможности отмены.${lastNote}`,
       confirmLabel: "Продать",
       destructive: true,
       onConfirm: () => {
@@ -3326,287 +3545,338 @@ function TransfersScreen({
         </View>
       )}
 
-      <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
-        <View style={styles.needsBox}>
-          <Text style={styles.needsTitle}>Куда усилить состав</Text>
-          <Text style={styles.needsLead}>
-            Подсказки по линиям, которые сейчас слабее остальных. Нажмите — откроется фильтр покупки.
-          </Text>
-          {needs.slice(0, 3).map((n) => (
-            <Pressable
-              key={n.position}
-              onPress={() => {
-                setTab("buy");
-                setPosFilter(n.position);
-              }}
-              style={styles.needsItem}
-            >
-              <Text
-                style={[
-                  styles.needsSeverity,
-                  n.severity === "high" && styles.needsHigh,
-                  n.severity === "medium" && styles.needsMed,
-                ]}
-              >
-                {n.severity === "high" ? "Срочно · " : n.severity === "medium" ? "Желательно · " : "На заметку · "}
-                {n.label}
-              </Text>
-              <Text style={styles.needsTip}>{n.tip}</Text>
-            </Pressable>
-          ))}
-        </View>
-
-        {open ? (
+      <FlatList
+        data={open && listsReady ? list : []}
+        keyExtractor={(p) => p.id}
+        initialNumToRender={10}
+        maxToRenderPerBatch={8}
+        windowSize={7}
+        removeClippedSubviews
+        contentContainerStyle={{ paddingBottom: 24 }}
+        ListHeaderComponent={
           <>
-            <View style={styles.tabs}>
-              {(
-                [
-                  ["buy", "Купить"],
-                  ["loan", "Взять"],
-                  ["loanOut", "Отдать"],
-                  ["sell", "Продать"],
-                ] as const
-              ).map(([id, label]) => (
-                <Pressable
-                  key={id}
-                  onPress={() => setTab(id)}
-                  style={[styles.tab, tab === id && styles.tabOn]}
-                >
-                  <Text style={[styles.tabText, tab === id && styles.tabTextOn]}>{label}</Text>
-                </Pressable>
-              ))}
+            <View style={styles.needsBox}>
+              <Text style={styles.needsTitle}>
+                {active ? `Сделки окна · ${active.label}` : "Сделки сезона"}
+              </Text>
+              {windowDeals.length === 0 ? (
+                <Text style={styles.needsLead}>Пока нет закрытых переходов в этом окне.</Text>
+              ) : (
+                windowDeals.slice(0, 16).map((d) => {
+                  const from = clubsById.get(d.fromClubId);
+                  const to = clubsById.get(d.toClubId);
+                  const big = isBigTransfer(d, windowDeals);
+                  return (
+                    <View key={d.id} style={styles.dealRow}>
+                      <Text style={styles.dealLine} numberOfLines={2}>
+                        {big ? "★ " : ""}
+                        «{from?.shortName ?? d.fromClubId}» → «{to?.shortName ?? d.toClubId}»
+                        {" · "}
+                        {d.playerName}
+                        {" · "}
+                        {d.kind === "loan" ? "аренда " : ""}
+                        {formatMarketValue(d.fee)}
+                      </Text>
+                      {big ? <Text style={styles.dealBig}>громкий трансфер</Text> : null}
+                    </View>
+                  );
+                })
+              )}
             </View>
 
-            <View style={styles.posFilterRow}>
-              {posChips.map((chip) => (
+            <View style={styles.needsBox}>
+              <Text style={styles.needsTitle}>Куда усилить состав</Text>
+              <Text style={styles.needsLead}>
+                Подсказки по линиям, которые сейчас слабее остальных. Нажмите — откроется фильтр покупки.
+              </Text>
+              {needs.slice(0, 3).map((n) => (
                 <Pressable
-                  key={chip.id}
-                  onPress={() => setPosFilter(chip.id)}
-                  style={[styles.posFilterChip, posFilter === chip.id && styles.filterChipOn]}
+                  key={n.position}
+                  onPress={() => {
+                    setTab("buy");
+                    setPosFilter(n.position);
+                  }}
+                  style={styles.needsItem}
                 >
                   <Text
-                    style={[styles.filterChipText, posFilter === chip.id && styles.filterChipTextOn]}
-                    numberOfLines={1}
+                    style={[
+                      styles.needsSeverity,
+                      n.severity === "high" && styles.needsHigh,
+                      n.severity === "medium" && styles.needsMed,
+                    ]}
                   >
-                    {chip.label}
+                    {n.severity === "high"
+                      ? "Срочно · "
+                      : n.severity === "medium"
+                        ? "Желательно · "
+                        : "На заметку · "}
+                    {n.label}
                   </Text>
+                  <Text style={styles.needsTip}>{n.tip}</Text>
                 </Pressable>
               ))}
             </View>
 
-            <View style={styles.sortRow}>
-              <Text style={styles.sortLabel}>Сортировка</Text>
-              <Pressable
-                onPress={() => toggleSort("rating")}
-                style={[styles.sortChip, sortBy === "rating" && styles.filterChipOn]}
-              >
-                <Text style={[styles.filterChipText, sortBy === "rating" && styles.filterChipTextOn]}>
-                  Рейтинг {sortBy === "rating" ? (sortDir === "desc" ? "↓" : "↑") : ""}
+            {open ? (
+              <>
+                <View style={styles.tabs}>
+                  {(
+                    [
+                      ["buy", "Купить"],
+                      ["loan", "Взять"],
+                      ["loanOut", "Отдать"],
+                      ["sell", "Продать"],
+                    ] as const
+                  ).map(([id, label]) => (
+                    <Pressable
+                      key={id}
+                      onPress={() => setTab(id)}
+                      style={[styles.tab, tab === id && styles.tabOn]}
+                    >
+                      <Text style={[styles.tabText, tab === id && styles.tabTextOn]}>{label}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <View style={styles.posFilterRow}>
+                  {posChips.map((chip) => (
+                    <Pressable
+                      key={chip.id}
+                      onPress={() => setPosFilter(chip.id)}
+                      style={[styles.posFilterChip, posFilter === chip.id && styles.filterChipOn]}
+                    >
+                      <Text
+                        style={[
+                          styles.filterChipText,
+                          posFilter === chip.id && styles.filterChipTextOn,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {chip.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <View style={styles.sortRow}>
+                  <Text style={styles.sortLabel}>Сортировка</Text>
+                  <Pressable
+                    onPress={() => toggleSort("rating")}
+                    style={[styles.sortChip, sortBy === "rating" && styles.filterChipOn]}
+                  >
+                    <Text
+                      style={[
+                        styles.filterChipText,
+                        sortBy === "rating" && styles.filterChipTextOn,
+                      ]}
+                    >
+                      Рейтинг {sortBy === "rating" ? (sortDir === "desc" ? "↓" : "↑") : ""}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => toggleSort("value")}
+                    style={[styles.sortChip, sortBy === "value" && styles.filterChipOn]}
+                  >
+                    <Text
+                      style={[
+                        styles.filterChipText,
+                        sortBy === "value" && styles.filterChipTextOn,
+                      ]}
+                    >
+                      Цена {sortBy === "value" ? (sortDir === "desc" ? "↓" : "↑") : ""}
+                    </Text>
+                  </Pressable>
+                </View>
+
+                <Text style={styles.hint}>
+                  {listsReady ? `Найдено: ${list.length}` : "Загрузка списка…"}
+                  {posFilter !== "all" ? ` · ${POSITION_LABEL[posFilter]}` : ""}
+                  {" · все чемпионаты"}
                 </Text>
+              </>
+            ) : null}
+          </>
+        }
+        ListEmptyComponent={
+          open && listsReady ? (
+            <Text style={styles.sub}>Нет игроков по выбранным фильтрам</Text>
+          ) : open && !listsReady ? (
+            <Text style={styles.sub}>Собираем рынок…</Text>
+          ) : null
+        }
+        renderItem={({ item: p }) => {
+          if (tab === "buy") {
+            const from = p.clubId ? clubsById.get(p.clubId) : undefined;
+            const fromLeague = p.clubId ? leagueByClubId.get(p.clubId) : undefined;
+            const canAfford = budget >= (p.marketValue ?? 0);
+            const matchesNeed = needPositions.has(primaryPosition(p));
+            return (
+              <View style={styles.transferRow}>
+                <Pressable
+                  style={styles.transferRowMain}
+                  onPress={() => onPlayer(p.id, p.clubId ?? save.clubId)}
+                >
+                  <PersonPortrait
+                    seed={p.id}
+                    size={36}
+                    jersey={from?.colors[0]}
+                    jerseySecondary={from?.colors[1]}
+                    age={p.age}
+                    portraitId={p.portraitId}
+                    nationalityId={p.nationalityId}
+                  />
+                  {from ? <ClubLogo club={from} size={16} /> : null}
+                  <View style={styles.clubMeta}>
+                    <Text style={styles.clubName}>
+                      {playerNameWithAge(p)}
+                      {matchesNeed ? " · нужно" : ""}
+                    </Text>
+                    <Text style={styles.clubCity}>
+                      {nationalityShort(p.nationalityId)} · {positionLabel(p)} · {p.overall} ·{" "}
+                      {from?.name}
+                      {fromLeague ? ` · ${fromLeague.name}` : ""}
+                    </Text>
+                  </View>
+                </Pressable>
+                <Pressable
+                  style={[styles.transferBuyBtn, !canAfford && styles.transferBuyBtnOff]}
+                  disabled={!canAfford}
+                  onPress={() => doBuy(p.id)}
+                >
+                  <Text
+                    style={[styles.transferBuyBtnText, !canAfford && styles.transferBuyBtnTextOff]}
+                    numberOfLines={2}
+                  >
+                    {canAfford
+                      ? `Предложить ${formatMarketValue(p.marketValue)}`
+                      : formatMarketValue(p.marketValue)}
+                  </Text>
+                </Pressable>
+              </View>
+            );
+          }
+          if (tab === "loan") {
+            const from = p.clubId ? clubsById.get(p.clubId) : undefined;
+            const fee = loanFeeForPlayer(p);
+            const canAfford = budget >= fee;
+            return (
+              <View style={styles.transferRow}>
+                <Pressable
+                  style={styles.transferRowMain}
+                  onPress={() => onPlayer(p.id, p.clubId ?? save.clubId)}
+                >
+                  <PersonPortrait
+                    seed={p.id}
+                    size={36}
+                    jersey={from?.colors[0]}
+                    jerseySecondary={from?.colors[1]}
+                    age={p.age}
+                    portraitId={p.portraitId}
+                    nationalityId={p.nationalityId}
+                  />
+                  {from ? <ClubLogo club={from} size={16} /> : null}
+                  <View style={styles.clubMeta}>
+                    <Text style={styles.clubName}>{playerNameWithAge(p)}</Text>
+                    <Text style={styles.clubCity}>
+                      {nationalityShort(p.nationalityId)} · {positionLabel(p)} · {p.overall} ·{" "}
+                      {from?.name} · скамейка/запас
+                    </Text>
+                  </View>
+                </Pressable>
+                <Pressable
+                  style={[styles.transferBuyBtn, !canAfford && styles.transferBuyBtnOff]}
+                  disabled={!canAfford}
+                  onPress={() => doLoan(p.id)}
+                >
+                  <Text
+                    style={[styles.transferBuyBtnText, !canAfford && styles.transferBuyBtnTextOff]}
+                    numberOfLines={2}
+                  >
+                    Аренда {formatMarketValue(fee)}
+                  </Text>
+                </Pressable>
+              </View>
+            );
+          }
+          if (tab === "loanOut") {
+            const interest = loanOutMeta.get(p.id);
+            return (
+              <View style={styles.transferRow}>
+                <Pressable
+                  style={styles.transferRowMain}
+                  onPress={() => onPlayer(p.id, save.clubId)}
+                >
+                  <PersonPortrait
+                    seed={p.id}
+                    size={36}
+                    jersey={club.colors[0]}
+                    jerseySecondary={club.colors[1]}
+                    age={p.age}
+                    portraitId={p.portraitId}
+                    nationalityId={p.nationalityId}
+                  />
+                  <View style={styles.clubMeta}>
+                    <Text style={styles.clubName}>{playerNameWithAge(p)}</Text>
+                    <Text style={styles.clubCity}>
+                      {nationalityShort(p.nationalityId)} · {positionLabel(p)} · {p.overall}
+                      {interest?.wouldStart ? " · возьмут в основу" : " · ротация"}
+                      {interest?.hostName ? ` · ${interest.hostName}` : ""}
+                    </Text>
+                  </View>
+                </Pressable>
+                <Pressable style={styles.transferBuyBtn} onPress={() => doLoanOut(p.id)}>
+                  <Text style={styles.transferBuyBtnText} numberOfLines={2}>
+                    Отдать {formatMarketValue(interest?.fee ?? loanFeeForPlayer(p))}
+                  </Text>
+                </Pressable>
+              </View>
+            );
+          }
+          const onLoan = Boolean(p.loan);
+          return (
+            <View style={styles.transferRow}>
+              <Pressable
+                style={styles.transferRowMain}
+                onPress={() => onPlayer(p.id, save.clubId)}
+              >
+                <PersonPortrait
+                  seed={p.id}
+                  size={36}
+                  jersey={club.colors[0]}
+                  jerseySecondary={club.colors[1]}
+                  age={p.age}
+                  portraitId={p.portraitId}
+                  nationalityId={p.nationalityId}
+                />
+                <View style={styles.clubMeta}>
+                  <Text style={styles.clubName}>
+                    {playerNameWithAge(p)}
+                    {onLoan ? " · аренда" : ""}
+                  </Text>
+                  <Text style={styles.clubCity}>
+                    {nationalityShort(p.nationalityId)} · {positionLabel(p)} · {p.overall}
+                    {onLoan && p.loan ? ` · до ${p.loan.until}` : ""}
+                  </Text>
+                </View>
               </Pressable>
               <Pressable
-                onPress={() => toggleSort("value")}
-                style={[styles.sortChip, sortBy === "value" && styles.filterChipOn]}
+                style={[styles.transferSellBtn, onLoan && styles.transferBuyBtnOff]}
+                disabled={onLoan}
+                onPress={() => doSell(p.id)}
               >
-                <Text style={[styles.filterChipText, sortBy === "value" && styles.filterChipTextOn]}>
-                  Цена {sortBy === "value" ? (sortDir === "desc" ? "↓" : "↑") : ""}
+                <Text
+                  style={[styles.transferSellBtnText, onLoan && styles.transferBuyBtnTextOff]}
+                  numberOfLines={2}
+                >
+                  {onLoan
+                    ? "Нельзя продать"
+                    : `${isLastCareerSeason(p) ? "Продать (посл. сезон)" : "Продать за"} ${formatMarketValue(p.marketValue)}`}
                 </Text>
               </Pressable>
             </View>
-
-            <Text style={styles.hint}>
-              Найдено: {list.length}
-              {posFilter !== "all" ? ` · ${POSITION_LABEL[posFilter]}` : ""}
-              {" · все чемпионаты"}
-            </Text>
-
-            {list.length === 0 ? (
-              <Text style={styles.sub}>Нет игроков по выбранным фильтрам</Text>
-            ) : null}
-            {tab === "buy" &&
-              list.map((p) => {
-                const from = pack.clubs.find((c) => c.id === p.clubId);
-                const fromLeague = from
-                  ? pack.leagues.find((l) => l.clubIds.includes(from.id))
-                  : undefined;
-                const canAfford = budget >= (p.marketValue ?? 0);
-                const matchesNeed = needPositions.has(primaryPosition(p));
-                return (
-                  <View key={p.id} style={styles.transferRow}>
-                    <Pressable
-                      style={styles.transferRowMain}
-                      onPress={() => onPlayer(p.id, p.clubId ?? save.clubId)}
-                    >
-                      <PersonPortrait
-                        seed={p.id}
-                        size={40}
-                        jersey={from?.colors[0]}
-                        jerseySecondary={from?.colors[1]}
-                        age={p.age}
-                        portraitId={p.portraitId}
-                        nationalityId={p.nationalityId}
-                      />
-                      {from ? <ClubLogo club={from} size={18} /> : null}
-                      <View style={styles.clubMeta}>
-                        <Text style={styles.clubName}>
-                          {playerDisplayName(p)}
-                          {matchesNeed ? " · нужно" : ""}
-                        </Text>
-                        <Text style={styles.clubCity}>
-                          {nationalityShort(p.nationalityId)} · {positionLabel(p)} · {p.overall} ·{" "}
-                          {from?.name}
-                          {fromLeague ? ` · ${fromLeague.name}` : ""}
-                        </Text>
-                      </View>
-                    </Pressable>
-                    <Pressable
-                      style={[styles.transferBuyBtn, !canAfford && styles.transferBuyBtnOff]}
-                      disabled={!canAfford}
-                      onPress={() => doBuy(p.id)}
-                    >
-                      <Text
-                        style={[styles.transferBuyBtnText, !canAfford && styles.transferBuyBtnTextOff]}
-                        numberOfLines={2}
-                      >
-                        {canAfford
-                          ? `Предложить ${formatMarketValue(p.marketValue)}`
-                          : formatMarketValue(p.marketValue)}
-                      </Text>
-                    </Pressable>
-                  </View>
-                );
-              })}
-            {tab === "loan" &&
-              list.map((p) => {
-                const from = pack.clubs.find((c) => c.id === p.clubId);
-                const fee = loanFeeForPlayer(p);
-                const canAfford = budget >= fee;
-                return (
-                  <View key={p.id} style={styles.transferRow}>
-                    <Pressable
-                      style={styles.transferRowMain}
-                      onPress={() => onPlayer(p.id, p.clubId ?? save.clubId)}
-                    >
-                      <PersonPortrait
-                        seed={p.id}
-                        size={40}
-                        jersey={from?.colors[0]}
-                        jerseySecondary={from?.colors[1]}
-                        age={p.age}
-                        portraitId={p.portraitId}
-                        nationalityId={p.nationalityId}
-                      />
-                      {from ? <ClubLogo club={from} size={18} /> : null}
-                      <View style={styles.clubMeta}>
-                        <Text style={styles.clubName}>{playerDisplayName(p)}</Text>
-                        <Text style={styles.clubCity}>
-                          {nationalityShort(p.nationalityId)} · {positionLabel(p)} · {p.overall} ·{" "}
-                          {from?.name} · скамейка/запас
-                        </Text>
-                      </View>
-                    </Pressable>
-                    <Pressable
-                      style={[styles.transferBuyBtn, !canAfford && styles.transferBuyBtnOff]}
-                      disabled={!canAfford}
-                      onPress={() => doLoan(p.id)}
-                    >
-                      <Text
-                        style={[styles.transferBuyBtnText, !canAfford && styles.transferBuyBtnTextOff]}
-                        numberOfLines={2}
-                      >
-                        Аренда {formatMarketValue(fee)}
-                      </Text>
-                    </Pressable>
-                  </View>
-                );
-              })}
-            {tab === "loanOut" &&
-              list.map((p) => {
-                const interest = evaluateLoanInterest(pack, save, p.id);
-                return (
-                  <View key={p.id} style={styles.transferRow}>
-                    <Pressable
-                      style={styles.transferRowMain}
-                      onPress={() => onPlayer(p.id, save.clubId)}
-                    >
-                      <PersonPortrait
-                        seed={p.id}
-                        size={40}
-                        jersey={club.colors[0]}
-                        jerseySecondary={club.colors[1]}
-                        age={p.age}
-                        portraitId={p.portraitId}
-                        nationalityId={p.nationalityId}
-                      />
-                      <View style={styles.clubMeta}>
-                        <Text style={styles.clubName}>{playerDisplayName(p)}</Text>
-                        <Text style={styles.clubCity}>
-                          {nationalityShort(p.nationalityId)} · {positionLabel(p)} · {p.overall}
-                          {interest.wouldStart ? " · возьмут в основу" : " · ротация"}
-                          {interest.hostName ? ` · ${interest.hostName}` : ""}
-                        </Text>
-                      </View>
-                    </Pressable>
-                    <Pressable
-                      style={styles.transferBuyBtn}
-                      onPress={() => doLoanOut(p.id)}
-                    >
-                      <Text style={styles.transferBuyBtnText} numberOfLines={2}>
-                        Отдать {formatMarketValue(interest.fee)}
-                      </Text>
-                    </Pressable>
-                  </View>
-                );
-              })}
-            {tab === "sell" &&
-              list.map((p) => {
-                const onLoan = Boolean(p.loan);
-                return (
-                  <View key={p.id} style={styles.transferRow}>
-                    <Pressable
-                      style={styles.transferRowMain}
-                      onPress={() => onPlayer(p.id, save.clubId)}
-                    >
-                      <PersonPortrait
-                        seed={p.id}
-                        size={40}
-                        jersey={club.colors[0]}
-                        jerseySecondary={club.colors[1]}
-                        age={p.age}
-                        portraitId={p.portraitId}
-                        nationalityId={p.nationalityId}
-                      />
-                      <View style={styles.clubMeta}>
-                        <Text style={styles.clubName}>
-                          {playerDisplayName(p)}
-                          {onLoan ? " · аренда" : ""}
-                        </Text>
-                        <Text style={styles.clubCity}>
-                          {nationalityShort(p.nationalityId)} · {positionLabel(p)} · {p.overall}
-                          {onLoan && p.loan ? ` · до ${p.loan.until}` : ""}
-                        </Text>
-                      </View>
-                    </Pressable>
-                    <Pressable
-                      style={[styles.transferSellBtn, onLoan && styles.transferBuyBtnOff]}
-                      disabled={onLoan}
-                      onPress={() => doSell(p.id)}
-                    >
-                      <Text
-                        style={[styles.transferSellBtnText, onLoan && styles.transferBuyBtnTextOff]}
-                        numberOfLines={2}
-                      >
-                        {onLoan
-                          ? "Нельзя продать"
-                          : `${isLastCareerSeason(p) ? "Продать (посл. сезон)" : "Продать за"} ${formatMarketValue(p.marketValue)}`}
-                      </Text>
-                    </Pressable>
-                  </View>
-                );
-              })}
-          </>
-        ) : null}
-      </ScrollView>
+          );
+        }}
+      />
 
       <AppDialog
         visible={!!dialog}
@@ -3638,8 +3908,22 @@ function CalendarScreen({
   const [leagueId, setLeagueId] = useState(homeLeague?.id ?? pack.leagues[0]?.id ?? "rpl");
   const [euroCup, setEuroCup] = useState<"all" | "ucl" | "uel" | "uecl">("all");
   const [mineOnly, setMineOnly] = useState(false);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    setReady(false);
+    const task = InteractionManager.runAfterInteractions(() => setReady(true));
+    return () => task.cancel();
+  }, [mode, leagueId, euroCup, mineOnly, save.id]);
+
+  const clubsById = useMemo(() => new Map(pack.clubs.map((c) => [c.id, c])), [pack.clubs]);
+  const tournamentName = useMemo(() => {
+    const m = new Map(pack.tournaments.map((t) => [t.id, t.name]));
+    return m;
+  }, [pack.tournaments]);
 
   const fixtures = useMemo(() => {
+    if (!ready) return [];
     const clubFilter = mineOnly ? save.clubId : undefined;
     if (mode === "league") {
       return listLeagueCalendar(save, leagueId, { clubId: clubFilter });
@@ -3648,7 +3932,7 @@ function CalendarScreen({
       tournamentId: euroCup,
       clubId: clubFilter,
     });
-  }, [save, mode, leagueId, euroCup, mineOnly]);
+  }, [save, mode, leagueId, euroCup, mineOnly, ready]);
 
   const matchdays = useMemo(() => groupFixturesByDate(fixtures), [fixtures]);
   const viewLeague = pack.leagues.find((l) => l.id === leagueId);
@@ -3657,9 +3941,9 @@ function CalendarScreen({
       ? "Все еврокубки"
       : pack.tournaments.find((t) => t.id === euroCup)?.name ?? euroCup;
 
-  const shortName = (id: string) => pack.clubs.find((c) => c.id === id)?.shortName ?? id;
+  const shortName = (id: string) => clubsById.get(id)?.shortName ?? id;
   const leagueOf = (clubId: string) => {
-    const c = pack.clubs.find((x) => x.id === clubId);
+    const c = clubsById.get(clubId);
     if (!c) return null;
     const league = pack.leagues.find((l) => l.clubIds.includes(clubId));
     if (league) return leagueChipLabel(league);
@@ -3772,69 +4056,76 @@ function CalendarScreen({
         {mode === "league" ? viewLeague?.name ?? "Чемпионат" : euroTitle}
       </Text>
       <Text style={styles.hint}>
-        {matchdays.length} туров · {fixtures.length} матчей
+        {ready ? `${matchdays.length} туров · ${fixtures.length} матчей` : "Загрузка…"}
         {mineOnly ? " · ваш клуб" : ""}
       </Text>
 
-      <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
-        {matchdays.length === 0 ? (
+      <FlatList
+        data={matchdays}
+        keyExtractor={(md) => md.date}
+        initialNumToRender={8}
+        maxToRenderPerBatch={6}
+        windowSize={6}
+        removeClippedSubviews
+        contentContainerStyle={{ paddingBottom: 32 }}
+        ListEmptyComponent={
           <Text style={styles.sub}>
-            {mode === "euro"
-              ? "Еврокубковых матчей в календаре пока нет."
-              : "Матчей не найдено."}
+            {!ready
+              ? "Собираем календарь…"
+              : mode === "euro"
+                ? "Еврокубковых матчей в календаре пока нет."
+                : "Матчей не найдено."}
           </Text>
-        ) : (
-          matchdays.map((md) => {
-            const past = md.date < save.currentDate;
-            const today = md.date === save.currentDate;
-            return (
-              <View key={md.date} style={styles.calendarDay}>
-                <Text
-                  style={[
-                    styles.calendarDayTitle,
-                    today && styles.calendarDayToday,
-                    past && !today && styles.calendarDayPast,
-                  ]}
-                >
-                  {md.date}
-                  {today ? " · сегодня" : past ? " · сыграно" : ""}
-                </Text>
-                {md.fixtures.map((f) => {
-                  const mine =
-                    f.homeClubId === save.clubId || f.awayClubId === save.clubId;
-                  const grp = mode === "euro" ? groupOf(f) : null;
-                  const score = f.result
-                    ? `${f.result.homeGoals}:${f.result.awayGoals}`
-                    : "vs";
-                  return (
-                    <Pressable
-                      key={f.id}
-                      style={[styles.calendarRow, mine && styles.calendarRowMine]}
-                      onPress={() => onSquad(f.homeClubId)}
-                    >
-                      <View style={styles.calendarClubs}>
-                        <Text style={styles.clubName} numberOfLines={1}>
-                          {shortName(f.homeClubId)} — {shortName(f.awayClubId)}
+        }
+        renderItem={({ item: md }) => {
+          const past = md.date < save.currentDate;
+          const today = md.date === save.currentDate;
+          return (
+            <View style={styles.calendarDay}>
+              <Text
+                style={[
+                  styles.calendarDayTitle,
+                  today && styles.calendarDayToday,
+                  past && !today && styles.calendarDayPast,
+                ]}
+              >
+                {md.date}
+                {today ? " · сегодня" : past ? " · сыграно" : ""}
+              </Text>
+              {md.fixtures.map((f) => {
+                const mine =
+                  f.homeClubId === save.clubId || f.awayClubId === save.clubId;
+                const grp = mode === "euro" ? groupOf(f) : null;
+                const score = f.result
+                  ? `${f.result.homeGoals}:${f.result.awayGoals}`
+                  : "vs";
+                return (
+                  <Pressable
+                    key={f.id}
+                    style={[styles.calendarRow, mine && styles.calendarRowMine]}
+                    onPress={() => onSquad(f.homeClubId)}
+                  >
+                    <View style={styles.calendarClubs}>
+                      <Text style={styles.clubName} numberOfLines={1}>
+                        {shortName(f.homeClubId)} — {shortName(f.awayClubId)}
+                      </Text>
+                      {mode === "euro" ? (
+                        <Text style={styles.clubCity}>
+                          {tournamentName.get(f.tournamentId) ?? f.tournamentId}
+                          {grp ? ` · ${grp}` : ""}
+                          {" · "}
+                          {leagueOf(f.homeClubId)} — {leagueOf(f.awayClubId)}
                         </Text>
-                        {mode === "euro" ? (
-                          <Text style={styles.clubCity}>
-                            {pack.tournaments.find((t) => t.id === f.tournamentId)?.name ??
-                              f.tournamentId}
-                            {grp ? ` · ${grp}` : ""}
-                            {" · "}
-                            {leagueOf(f.homeClubId)} — {leagueOf(f.awayClubId)}
-                          </Text>
-                        ) : null}
-                      </View>
-                      <Text style={styles.calendarScore}>{score === "vs" ? "—" : score}</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            );
-          })
-        )}
-      </ScrollView>
+                      ) : null}
+                    </View>
+                    <Text style={styles.calendarScore}>{score === "vs" ? "—" : score}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          );
+        }}
+      />
     </View>
   );
 }
@@ -3983,9 +4274,9 @@ function AcademyScreen({
                   nationalityId={p.nationalityId}
                 />
                 <View style={styles.clubMeta}>
-                  <Text style={styles.clubName}>{playerDisplayName(p)}</Text>
+                  <Text style={styles.clubName}>{playerNameWithAge(p)}</Text>
                   <Text style={styles.clubCity}>
-                    {positionLabel(p)} · {p.age} лет · OVR {p.overall} · пот. {p.potential}
+                    {positionLabel(p)} · OVR {p.overall} · пот. {p.potential}
                   </Text>
                   <Text style={styles.clubCity}>
                     {nationalityShort(p.nationalityId)} · {formatMarketValue(p.marketValue)}
@@ -4215,6 +4506,51 @@ const styles = StyleSheet.create({
     lineHeight: 19,
     marginTop: 4,
   },
+  negoFeedbackReject: {
+    color: "#E8A0A0",
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 2,
+  },
+  negoFeedbackAccept: {
+    color: "#6BCB8A",
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 2,
+  },
+  negoSellerBox: {
+    marginTop: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: "#24332C",
+    backgroundColor: "#0E1512",
+  },
+  negoSellerBoxReject: {
+    borderColor: "#5A3030",
+    backgroundColor: "#1A1010",
+  },
+  negoSellerLabel: {
+    color: "#C6A75E",
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+    marginBottom: 4,
+  },
+  dealRow: {
+    paddingVertical: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#24332C",
+  },
+  dealLine: { color: "#E8F0EA", fontSize: 12, lineHeight: 17 },
+  dealBig: { color: "#C6A75E", fontSize: 10, marginTop: 2, fontWeight: "700" },
+  moveRow: {
+    paddingVertical: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "#24332C",
+  },
+  moveDate: { color: "#5F7A6C", fontSize: 11 },
+  moveBody: { color: "#E8F0EA", fontSize: 13, marginTop: 2, lineHeight: 18 },
   negoRaiseRow: { flexDirection: "row", gap: 8, marginTop: 4 },
   negoRaiseBtn: {
     flex: 1,
@@ -4380,9 +4716,9 @@ const styles = StyleSheet.create({
     minHeight: 32,
   },
   prePos: {
-    width: 28,
+    width: 44,
     color: "#C6A75E",
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: "700",
     textAlign: "center",
   },
@@ -4573,7 +4909,7 @@ const styles = StyleSheet.create({
   },
   proposalTitle: { color: "#C6A75E", fontSize: 12, fontWeight: "700" },
   proposalActions: { gap: 6 },
-  posBadge: { width: 36, color: "#C6A75E", fontSize: 11, fontWeight: "700" },
+  posBadge: { minWidth: 36, maxWidth: 72, color: "#C6A75E", fontSize: 10, fontWeight: "700" },
   traitRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 },
   traitChip: { borderWidth: 1, borderColor: "#C6A75E", color: "#C6A75E", padding: 6, alignSelf: "flex-start", fontSize: 12 },
   attrRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 },

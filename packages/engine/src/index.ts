@@ -86,6 +86,7 @@ export {
   detectClosedTransferWindow,
   clearWindowReport,
   defaultLoanUntil,
+  isBigTransfer,
 } from "./transfers";
 export type { BuyNegotiation, OfferDecision } from "./transfers";
 export type { TransferDealRecord, WindowTransferReport } from "./types";
@@ -105,8 +106,11 @@ export {
   primaryPosition,
   primaryRole,
   preferredRoleLabel,
+  rolesLabel,
   positionLabel,
   playerDisplayName,
+  playerNameWithAge,
+  squadAverageOverall,
   clubDisplayName,
   clubTitleLines,
   formatMarketValue,

@@ -122,22 +122,21 @@ const PRESIDENT_PORTRAITS = [require("../../assets/portraits/staff-01.png")] as 
 const JOURNALIST_PORTRAITS = [require("../../assets/portraits/staff-02.png")] as const;
 const SD_PORTRAITS = [require("../../assets/portraits/staff-03.png")] as const;
 
-const ALL_PORTRAIT_MODULES = [
-  ...PLAYER_PORTRAITS,
-  ...COACH_PORTRAITS,
-  ...PRESIDENT_PORTRAITS,
-  ...JOURNALIST_PORTRAITS,
-  ...SD_PORTRAITS,
-];
-
 let portraitsPreloaded = false;
 
-/** Warm local portrait PNGs into the asset/image cache at app start. */
+/** Warm a small slice of portraits — full pack is ~100 files; lists virtualize the rest. */
 export async function preloadPortraits(): Promise<void> {
   if (portraitsPreloaded) return;
-  await Asset.loadAsync([...ALL_PORTRAIT_MODULES]);
+  const warm = [
+    ...PLAYER_PORTRAITS.slice(0, 12),
+    ...COACH_PORTRAITS,
+    ...PRESIDENT_PORTRAITS,
+    ...JOURNALIST_PORTRAITS,
+    ...SD_PORTRAITS,
+  ];
+  await Asset.loadAsync([...warm]);
   await Promise.all(
-    ALL_PORTRAIT_MODULES.map((mod) => {
+    warm.map((mod) => {
       const asset = Asset.fromModule(mod);
       const uri = asset.localUri ?? asset.uri;
       return uri ? Image.prefetch(uri) : Promise.resolve(false);

@@ -97,6 +97,40 @@ function ensureTransferLog(save: CareerSave): TransferDealRecord[] {
   return save.transferLog;
 }
 
+function appendCareerMove(
+  player: Player,
+  move: {
+    date: string;
+    kind: "permanent" | "loan" | "loan_return";
+    fromClubId: string;
+    toClubId: string;
+    fee: number;
+    fromClubName?: string;
+    toClubName?: string;
+  }
+): void {
+  if (!player.careerMoves) player.careerMoves = [];
+  player.careerMoves.unshift(move);
+  player.careerMoves = player.careerMoves.slice(0, 40);
+}
+
+/** High-fee / headline deals in a window (absolute floor or top of the window). */
+export function isBigTransfer(
+  deal: TransferDealRecord,
+  windowDeals: TransferDealRecord[],
+  absoluteFloor = 20
+): boolean {
+  if (deal.kind !== "permanent") return false;
+  if (deal.fee >= absoluteFloor) return true;
+  const fees = windowDeals
+    .filter((d) => d.kind === "permanent")
+    .map((d) => d.fee)
+    .sort((a, b) => b - a);
+  if (fees.length < 4) return deal.fee >= Math.max(12, absoluteFloor * 0.6);
+  const cut = fees[Math.max(0, Math.ceil(fees.length * 0.15) - 1)] ?? absoluteFloor;
+  return deal.fee >= cut && deal.fee >= 8;
+}
+
 function recordDeal(
   save: CareerSave,
   deal: Omit<TransferDealRecord, "id" | "windowId"> & { windowId?: string }
@@ -446,24 +480,36 @@ export function buyPlayer(
 
   ensureFinances(next, next.clubId);
   ensureFinances(next, fromClubId);
-  if (next.clubFinances[next.clubId].budget < fee) {
+  const budgetBefore = next.clubFinances[next.clubId].budget;
+  if (budgetBefore < fee) {
     return { ok: false, save, error: "Недостаточно бюджета." };
   }
 
   const fromClub = pack.clubs.find((c) => c.id === fromClubId);
   const toClub = pack.clubs.find((c) => c.id === next.clubId);
   next.clubFinances[next.clubId].budget =
-    Math.round((next.clubFinances[next.clubId].budget - fee) * 10) / 10;
+    Math.round((budgetBefore - fee) * 10) / 10;
   next.clubFinances[fromClubId].budget =
     Math.round((next.clubFinances[fromClubId].budget + fee) * 10) / 10;
+  const budgetAfter = next.clubFinances[next.clubId].budget;
 
   // Move swap players to seller
   const swapNames: string[] = [];
   for (const id of uniqueSwapIds) {
     const sp = next.players.find((p) => p.id === id);
     if (!sp) continue;
+    const swapFrom = next.clubId;
     sp.clubId = fromClubId;
     delete sp.loan;
+    appendCareerMove(sp, {
+      date: next.currentDate,
+      kind: "permanent",
+      fromClubId: swapFrom,
+      toClubId: fromClubId,
+      fee: 0,
+      fromClubName: toClub?.shortName ?? toClub?.name,
+      toClubName: fromClub?.shortName ?? fromClub?.name,
+    });
     swapNames.push(`${sp.firstName} ${sp.lastName}`);
     if (next.userTactics?.lineup?.includes(sp.id)) {
       next.userTactics = {
@@ -479,6 +525,15 @@ export function buyPlayer(
   player.clubId = next.clubId;
   player.marketValue = recomputeMarketValue(player, next.playerStats?.[player.id] ?? null);
   delete player.loan;
+  appendCareerMove(player, {
+    date: next.currentDate,
+    kind: "permanent",
+    fromClubId,
+    toClubId: next.clubId,
+    fee,
+    fromClubName: fromClub?.shortName ?? fromClub?.name,
+    toClubName: toClub?.shortName ?? toClub?.name,
+  });
   if (!next.seasonStartMarketValues) next.seasonStartMarketValues = {};
   if (next.seasonStartMarketValues[player.id] == null) {
     next.seasonStartMarketValues[player.id] = player.marketValue;
@@ -494,7 +549,7 @@ export function buyPlayer(
     date: next.currentDate,
     category: "transfer",
     headline: `${player.firstName} ${player.lastName} → «${toClub?.shortName ?? "клуб"}»`,
-    body: `Клуб приобрёл игрока за ${fee.toFixed(1)} млн у «${fromClub?.name ?? fromClubId}»${swapPart}${overMv}. Бюджет: ${next.clubFinances[next.clubId].budget.toFixed(1)} млн.`,
+    body: `Клуб приобрёл игрока за ${fee.toFixed(1)} млн у «${fromClub?.name ?? fromClubId}»${swapPart}${overMv}. Бюджет: ${budgetBefore.toFixed(1)} → ${budgetAfter.toFixed(1)} млн.`,
     relatedClubIds: [next.clubId, fromClubId],
     relatedPlayerIds: [player.id, ...uniqueSwapIds],
   });
@@ -508,7 +563,7 @@ export function buyPlayer(
     fee,
   });
 
-  return { ok: true, save: next };
+  return { ok: true, save: next, fee, budgetBefore, budgetAfter };
 }
 
 export function sellPlayer(
@@ -549,16 +604,28 @@ export function sellPlayer(
     // AI still buys — soft budget for AI
   }
 
+  const budgetBefore = next.clubFinances[next.clubId].budget;
   next.clubFinances[next.clubId].budget =
-    Math.round((next.clubFinances[next.clubId].budget + fee) * 10) / 10;
+    Math.round((budgetBefore + fee) * 10) / 10;
   next.clubFinances[buyer.id].budget = Math.max(
     0,
     Math.round((next.clubFinances[buyer.id].budget - fee) * 10) / 10
   );
+  const budgetAfter = next.clubFinances[next.clubId].budget;
 
   const fromClub = pack.clubs.find((c) => c.id === next.clubId);
+  const fromClubId = next.clubId;
   player.clubId = buyer.id;
   player.marketValue = recomputeMarketValue(player, next.playerStats?.[player.id] ?? null);
+  appendCareerMove(player, {
+    date: next.currentDate,
+    kind: "permanent",
+    fromClubId,
+    toClubId: buyer.id,
+    fee,
+    fromClubName: fromClub?.shortName ?? fromClub?.name,
+    toClubName: buyer.shortName ?? buyer.name,
+  });
 
   // Remove from user lineup if present
   const tactics = next.userTactics ?? defaultTactics(next.players, next.clubId);
@@ -575,7 +642,7 @@ export function sellPlayer(
     date: next.currentDate,
     category: "transfer",
     headline: `${player.firstName} ${player.lastName} ушёл в «${buyer.shortName}»`,
-    body: `«${fromClub?.name ?? next.clubId}» продали игрока за ${fee.toFixed(1)} млн. Бюджет: ${next.clubFinances[next.clubId].budget.toFixed(1)} млн.`,
+    body: `«${fromClub?.name ?? next.clubId}» продали игрока за ${fee.toFixed(1)} млн. Бюджет: ${budgetBefore.toFixed(1)} → ${budgetAfter.toFixed(1)} млн.`,
     relatedClubIds: [next.clubId, buyer.id],
     relatedPlayerIds: [player.id],
   });
@@ -589,7 +656,7 @@ export function sellPlayer(
     fee,
   });
 
-  return { ok: true, save: next };
+  return { ok: true, save: next, fee, budgetBefore, budgetAfter };
 }
 
 function pickAiBuyer(pack: WorldPack, save: CareerSave, player: Player): Club | undefined {
@@ -665,12 +732,20 @@ export function simulateAiTransfers(pack: WorldPack, save: CareerSave, rng: Rng)
           Math.round((save.clubFinances[buyerId].budget - fee) * 10) / 10;
         save.clubFinances[sellerId].budget =
           Math.round((save.clubFinances[sellerId].budget + fee) * 10) / 10;
+        const fromClub = pack.clubs.find((c) => c.id === sellerId);
+        const toClub = pack.clubs.find((c) => c.id === buyerId);
         pick.clubId = buyerId;
         pick.marketValue = recomputeMarketValue(pick, save.playerStats?.[pick.id] ?? null);
         delete pick.loan;
-
-        const fromClub = pack.clubs.find((c) => c.id === sellerId);
-        const toClub = pack.clubs.find((c) => c.id === buyerId);
+        appendCareerMove(pick, {
+          date: save.currentDate,
+          kind: "permanent",
+          fromClubId: sellerId,
+          toClubId: buyerId,
+          fee,
+          fromClubName: fromClub?.shortName ?? fromClub?.name,
+          toClubName: toClub?.shortName ?? toClub?.name,
+        });
         save.news.unshift({
           id: `news-ai-transfer-${pick.id}-${save.currentDate}-${i}`,
           date: save.currentDate,
@@ -829,14 +904,20 @@ export function listLoanTargets(
     needsByClub: new Map<string, ReturnType<typeof analyzeSquadNeeds>>(),
     squadByClub: new Map<string, Player[]>(),
   };
-  const pool = save.players.filter((p) => {
-    if (!p.clubId || p.clubId === save.clubId || p.loan) return false;
-    // Cheap rejects before lineup work
-    if (p.overall >= 86) return false;
-    return evaluateLoanWillingness(pack, save, p.id, cache).ok;
-  });
-  pool.sort((a, b) => b.overall - a.overall || (a.marketValue ?? 0) - (b.marketValue ?? 0));
-  return pool.slice(0, limit);
+  // Rank first, then evaluate only a shortlist — full-world willingness checks are costly.
+  const shortlist = save.players
+    .filter((p) => p.clubId && p.clubId !== save.clubId && !p.loan && p.overall < 86)
+    .sort((a, b) => b.overall - a.overall || (a.marketValue ?? 0) - (b.marketValue ?? 0))
+    .slice(0, Math.max(limit * 5, 200));
+
+  const accepted: Player[] = [];
+  for (const p of shortlist) {
+    if (evaluateLoanWillingness(pack, save, p.id, cache).ok) {
+      accepted.push(p);
+      if (accepted.length >= limit) break;
+    }
+  }
+  return accepted;
 }
 
 export function loanPlayer(
@@ -861,16 +942,18 @@ export function loanPlayer(
   const fee = verdict.fee;
   ensureFinances(next, next.clubId);
   ensureFinances(next, verdict.parentClubId);
-  if (next.clubFinances[next.clubId].budget < fee) {
+  const budgetBefore = next.clubFinances[next.clubId].budget;
+  if (budgetBefore < fee) {
     return { ok: false, save, error: "Недостаточно бюджета на аренду." };
   }
 
   const fromClub = pack.clubs.find((c) => c.id === verdict.parentClubId);
   const toClub = pack.clubs.find((c) => c.id === next.clubId);
   next.clubFinances[next.clubId].budget =
-    Math.round((next.clubFinances[next.clubId].budget - fee) * 10) / 10;
+    Math.round((budgetBefore - fee) * 10) / 10;
   next.clubFinances[verdict.parentClubId].budget =
     Math.round((next.clubFinances[verdict.parentClubId].budget + fee) * 10) / 10;
+  const budgetAfter = next.clubFinances[next.clubId].budget;
 
   player.loan = {
     parentClubId: verdict.parentClubId,
@@ -878,6 +961,15 @@ export function loanPlayer(
     until: defaultLoanUntil(next),
   };
   player.clubId = next.clubId;
+  appendCareerMove(player, {
+    date: next.currentDate,
+    kind: "loan",
+    fromClubId: verdict.parentClubId,
+    toClubId: next.clubId,
+    fee,
+    fromClubName: fromClub?.shortName ?? fromClub?.name,
+    toClubName: toClub?.shortName ?? toClub?.name,
+  });
   if (!next.seasonStartMarketValues) next.seasonStartMarketValues = {};
   if (next.seasonStartMarketValues[player.id] == null) {
     next.seasonStartMarketValues[player.id] = player.marketValue ?? fee;
@@ -888,7 +980,7 @@ export function loanPlayer(
     date: next.currentDate,
     category: "transfer",
     headline: `${player.firstName} ${player.lastName} в аренду → «${toClub?.shortName ?? "клуб"}»`,
-    body: `Аренда у «${fromClub?.name ?? verdict.parentClubId}» до ${player.loan.until} за ${fee.toFixed(1)} млн.`,
+    body: `Аренда у «${fromClub?.name ?? verdict.parentClubId}» до ${player.loan.until} за ${fee.toFixed(1)} млн. Бюджет: ${budgetBefore.toFixed(1)} → ${budgetAfter.toFixed(1)} млн.`,
     relatedClubIds: [next.clubId, verdict.parentClubId],
     relatedPlayerIds: [player.id],
   });
@@ -902,7 +994,7 @@ export function loanPlayer(
     fee,
   });
 
-  return { ok: true, save: next };
+  return { ok: true, save: next, fee, budgetBefore, budgetAfter };
 }
 
 /**
@@ -1094,10 +1186,12 @@ export function loanOutPlayer(
 
   const host = pack.clubs.find((c) => c.id === hostId);
   const parent = pack.clubs.find((c) => c.id === next.clubId);
+  const budgetBefore = next.clubFinances[next.clubId].budget;
   next.clubFinances[hostId].budget =
     Math.round((next.clubFinances[hostId].budget - fee) * 10) / 10;
   next.clubFinances[next.clubId].budget =
-    Math.round((next.clubFinances[next.clubId].budget + fee) * 10) / 10;
+    Math.round((budgetBefore + fee) * 10) / 10;
+  const budgetAfter = next.clubFinances[next.clubId].budget;
 
   player.loan = {
     parentClubId: next.clubId,
@@ -1105,6 +1199,15 @@ export function loanOutPlayer(
     until: defaultLoanUntil(next),
   };
   player.clubId = hostId;
+  appendCareerMove(player, {
+    date: next.currentDate,
+    kind: "loan",
+    fromClubId: next.clubId,
+    toClubId: hostId,
+    fee,
+    fromClubName: parent?.shortName ?? parent?.name,
+    toClubName: host?.shortName ?? host?.name,
+  });
 
   if (next.userTactics?.lineup) {
     next.userTactics = {
@@ -1125,7 +1228,7 @@ export function loanOutPlayer(
     date: next.currentDate,
     category: "transfer",
     headline: `${player.firstName} ${player.lastName} → аренда в «${host?.shortName ?? "клуб"}»`,
-    body: `«${parent?.shortName ?? "Клуб"}» отдали игрока до ${player.loan.until} за ${fee.toFixed(1)} млн. В аренде он сможет набирать игровую практику.`,
+    body: `«${parent?.shortName ?? "Клуб"}» отдали игрока до ${player.loan.until} за ${fee.toFixed(1)} млн. Бюджет: ${budgetBefore.toFixed(1)} → ${budgetAfter.toFixed(1)} млн.`,
     relatedClubIds: [next.clubId, hostId],
     relatedPlayerIds: [player.id],
   });
@@ -1139,7 +1242,7 @@ export function loanOutPlayer(
     fee,
   });
 
-  return { ok: true, save: next };
+  return { ok: true, save: next, fee, budgetBefore, budgetAfter };
 }
 
 /** Return expired loans to parent clubs (mutates save). */
@@ -1149,8 +1252,22 @@ export function resolveExpiredLoans(pack: WorldPack, save: CareerSave): void {
     if (save.currentDate < p.loan.until) continue;
     const parentId = p.loan.parentClubId;
     const wasAt = p.clubId;
+    const fee = p.loan.fee;
     p.clubId = parentId;
     delete p.loan;
+    const parent = pack.clubs.find((c) => c.id === parentId);
+    const host = wasAt ? pack.clubs.find((c) => c.id === wasAt) : undefined;
+    if (wasAt) {
+      appendCareerMove(p, {
+        date: save.currentDate,
+        kind: "loan_return",
+        fromClubId: wasAt,
+        toClubId: parentId,
+        fee,
+        fromClubName: host?.shortName ?? host?.name,
+        toClubName: parent?.shortName ?? parent?.name,
+      });
+    }
     if (wasAt === save.clubId && save.userTactics?.lineup) {
       save.userTactics = {
         ...save.userTactics,
@@ -1160,8 +1277,6 @@ export function resolveExpiredLoans(pack: WorldPack, save: CareerSave): void {
         save.userTactics = defaultTactics(save.players, save.clubId, save.userTactics.formation);
       }
     }
-    const parent = pack.clubs.find((c) => c.id === parentId);
-    const host = wasAt ? pack.clubs.find((c) => c.id === wasAt) : undefined;
     save.news.unshift({
       id: `news-loan-return-${p.id}-${save.currentDate}`,
       date: save.currentDate,

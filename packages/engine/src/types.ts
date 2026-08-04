@@ -86,6 +86,17 @@ export type PlayerTrait =
   | "sweeper_keeper"
   | "dribbler";
 
+/** Persistent transfer/loan history on a player (survives season log reset). */
+export interface CareerMove {
+  date: string;
+  kind: "permanent" | "loan" | "loan_return";
+  fromClubId: string;
+  toClubId: string;
+  fee: number;
+  fromClubName?: string;
+  toClubName?: string;
+}
+
 export interface Player {
   id: string;
   firstName: string;
@@ -118,6 +129,8 @@ export interface Player {
     fee: number;
     until: string;
   };
+  /** Club moves across the player's career (permanent + loans). */
+  careerMoves?: CareerMove[];
 }
 
 export interface League {
@@ -441,4 +454,10 @@ export interface TransferResult {
   ok: boolean;
   save: CareerSave;
   error?: string;
+  /** Fee paid/received when ok. */
+  fee?: number;
+  /** Buyer/user budget before the deal (when applicable). */
+  budgetBefore?: number;
+  /** Buyer/user budget after the deal (when applicable). */
+  budgetAfter?: number;
 }
