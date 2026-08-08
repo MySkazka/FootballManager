@@ -4,12 +4,12 @@ export type PortraitTone = "light" | "medium" | "dark";
 export const PORTRAIT_COUNT = 100;
 
 /** Bump when portrait pack or assignment rules change — triggers respread on save load. */
-export const PORTRAIT_SCHEMA = 5;
+export const PORTRAIT_SCHEMA = 6;
 
 /**
  * Portrait IDs blocked for players (0-based → player-(id+1).png).
- * Female-looking or elderly / non-footballer faces — remapped on save load.
- * These IDs remain available for staff / executive avatars in the mobile UI.
+ * Female-looking, elderly, or clearly childlike / underage faces — remapped on save load.
+ * Elderly IDs remain available for staff / executive avatars in the mobile UI.
  */
 export const PLAYER_PORTRAIT_BLOCKLIST: readonly number[] = [
   // Elderly / clearly past playing age
@@ -22,12 +22,116 @@ export const PLAYER_PORTRAIT_BLOCKLIST: readonly number[] = [
   // Female-looking / strongly feminine presentation
   77, // player-78 double bun
   80, // player-81 violet long
+  // Clearly childlike / underage-looking (not adult footballers)
+  0, // player-01 bowl-cut baby-face
+  2, // player-03 blond freckled child
+  3, // player-04 faux-hawk childlike
+  4, // player-05 freckled auburn yellow
+  8, // player-09 freckled ginger teal
+  20, // player-21 blond round child face
+  30, // player-31 freckled ginger green
+  32, // player-33 ash-gray childlike
+  46, // player-47 strawberry bowl child
+  52, // player-53 neon orange pre-teen
+  54, // player-55 bowl-cut black blue jersey (screenshot)
+  64, // player-65 pink curly freckled child
+  66, // player-67 dirty blonde childlike
+  74, // player-75 blond freckled yellow (screenshot)
+  82, // player-83 mint tips child
+  90, // player-91 flat-top childlike
+  92, // player-93 blonde bangs chibi
+  94, // player-95 orange curly freckled tooth-gap
+  96, // player-97 brown hair childlike
+  98, // player-99 neon blue hair child
 ];
 
 const BLOCKED = new Set(PLAYER_PORTRAIT_BLOCKLIST);
 
 /** Mature / executive faces (subset of blocklist) for president & SD pools. */
 export const STAFF_EXEC_PORTRAIT_IDS: readonly number[] = [39, 51, 63, 75, 93, 97];
+
+/**
+ * Player-pack faces used for coaches (0-based → player-(id+1).png).
+ * Includes STAFF_EXEC (blocked for players) plus extra mature looks.
+ * Do not feed these back into player assignment via the allowlist.
+ */
+export const COACH_FACE_PORTRAIT_IDS: readonly number[] = [
+  ...STAFF_EXEC_PORTRAIT_IDS,
+  36, // bald mustache
+  19,
+  6,
+  84,
+  45,
+  72,
+  31,
+  33,
+  62,
+  44,
+  70,
+  14,
+  27,
+  55,
+  57,
+  88,
+  91,
+  28,
+  48,
+  86,
+  73,
+  89,
+  99, // player-100 curly beard
+];
+
+/** Dedicated mobile assets prepended before face IDs: coach-01, staff-03, staff-01. */
+export const COACH_DEDICATED_PORTRAIT_COUNT = 3;
+
+export function coachPortraitPoolSize(): number {
+  return COACH_DEDICATED_PORTRAIT_COUNT + COACH_FACE_PORTRAIT_IDS.length;
+}
+
+function staffSeedHash(seed: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h >>> 0);
+}
+
+/**
+ * Stable staff portrait slot for a club role (`0 .. poolSize-1`).
+ * Seed form matches UI: `${role}:${clubId}` (e.g. `coach:eng-forest`).
+ * When `peerClubIds` is set, linear-probes so peers get distinct slots while the pool allows.
+ */
+export function portraitSlotForStaff(
+  role: "coach" | "president" | "sporting_director" | "journalist",
+  clubId: string,
+  poolSize: number,
+  peerClubIds: readonly string[] = []
+): number {
+  if (poolSize <= 0) return 0;
+  const peers =
+    peerClubIds.length > 0
+      ? [...new Set(peerClubIds.filter(Boolean))].sort()
+      : [clubId];
+  const assigned = new Map<string, number>();
+  const used = new Set<number>();
+  for (const id of peers) {
+    let slot = staffSeedHash(`${role}:${id}`) % poolSize;
+    if (used.has(slot) && used.size < poolSize) {
+      for (let step = 1; step < poolSize; step++) {
+        const cand = (slot + step) % poolSize;
+        if (!used.has(cand)) {
+          slot = cand;
+          break;
+        }
+      }
+    }
+    used.add(slot);
+    assigned.set(id, slot);
+  }
+  return assigned.get(clubId) ?? staffSeedHash(`${role}:${clubId}`) % poolSize;
+}
 
 /**
  * Tone of each player-0N.png (0-based index).
@@ -125,7 +229,7 @@ if (PORTRAIT_TONES.length !== PORTRAIT_COUNT) {
   throw new Error(`PORTRAIT_TONES length ${PORTRAIT_TONES.length} != PORTRAIT_COUNT ${PORTRAIT_COUNT}`);
 }
 
-/** Young/male footballer faces only (blocklist excluded). */
+/** Adult male footballer faces only (blocklist excluded). */
 export const PLAYER_PORTRAIT_ALLOWLIST: readonly number[] = [
   ...Array.from({ length: PORTRAIT_COUNT }, (_, i) => i).filter((id) => !BLOCKED.has(id)),
 ];

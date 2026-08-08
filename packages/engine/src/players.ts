@@ -664,6 +664,39 @@ export function generateWorldPlayers(pack: WorldPack, seed: number): Player[] {
   return pack.clubs.flatMap((c) => generateSquad(pack, c.id, rng, names));
 }
 
+/**
+ * Same RNG/name stream as {@link generateWorldPlayers}, but yields per-club average OVR
+ * so UI can pump a few clubs per frame without freezing the JS thread.
+ */
+export function createWorldSquadOvrBuilder(
+  pack: WorldPack,
+  seed: number
+): {
+  map: Map<string, number>;
+  /** Process up to `n` clubs; returns true when finished. */
+  step: (n?: number) => boolean;
+} {
+  const rng = new Rng(seed);
+  const names = new UniqueNames();
+  const map = new Map<string, number>();
+  let i = 0;
+  return {
+    map,
+    step(n = 4) {
+      const end = Math.min(pack.clubs.length, i + Math.max(1, n));
+      while (i < end) {
+        const club = pack.clubs[i++];
+        const players = generateSquad(pack, club.id, rng, names);
+        const avg = players.length
+          ? Math.round(players.reduce((sum, p) => sum + p.overall, 0) / players.length)
+          : 0;
+        map.set(club.id, avg);
+      }
+      return i >= pack.clubs.length;
+    },
+  };
+}
+
 /** Append squads for pack clubs that have no players yet (e.g. new euro guests). */
 export function ensureMissingClubSquads(
   pack: WorldPack,

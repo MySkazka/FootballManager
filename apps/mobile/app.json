@@ -1,15 +1,20 @@
 {
   "expo": {
     "name": "Менеджер от Бога",
-    "slug": "menedzher-ot-boga",
+    "slug": "football-manager",
     "version": "0.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.bandervans.menedzherotboga",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
+      "package": "com.bandervans.menedzherotboga",
       "adaptiveIcon": {
         "backgroundColor": "#0E1512",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -23,6 +28,12 @@
     },
     "plugins": [
       "expo-asset"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "e5db696b-fe39-429f-adda-623653c3a38c"
+      }
+    },
+    "owner": "bandervandollar"
   }
 }

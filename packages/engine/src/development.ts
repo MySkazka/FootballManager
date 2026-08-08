@@ -1,5 +1,6 @@
 import { computeOverall, primaryPosition } from "./labels";
 import { recomputeMarketValue } from "./players";
+import { buildSeasonEndQuotes, type SeasonEndQuote } from "./seasonQuotes";
 import { averageRating, leagueTopScorers, leagueTopAssists, leagueTopRatings } from "./stats";
 import type {
   CareerSave,
@@ -8,6 +9,8 @@ import type {
   PlayerSeasonStats,
   WorldPack,
 } from "./types";
+
+export type { SeasonEndQuote };
 
 function clampAttr(v: number): number {
   return Math.max(25, Math.min(95, Math.round(v)));
@@ -140,13 +143,18 @@ export interface SeasonAwards {
   userClubId: string;
   userClubName: string;
   topScorerName?: string;
+  topScorerId?: string;
   topScorerGoals?: number;
   topAssistName?: string;
+  topAssistId?: string;
   topAssistCount?: number;
   topRatingName?: string;
+  topRatingId?: string;
   topRatingValue?: number;
   headline: string;
   body: string;
+  /** Club hierarchy reactions — unique lines per role. */
+  quotes: SeasonEndQuote[];
 }
 
 export function userLeagueId(pack: WorldPack, clubId: string): string | undefined {
@@ -216,13 +224,21 @@ export function buildSeasonAwards(pack: WorldPack, save: CareerSave): SeasonAwar
     userClubId: save.clubId,
     userClubName: userClub?.name ?? save.clubId,
     topScorerName: scorerP ? `${scorerP.firstName} ${scorerP.lastName}` : undefined,
+    topScorerId: scorerP?.id,
     topScorerGoals: scorers[0]?.goals,
     topAssistName: assistP ? `${assistP.firstName} ${assistP.lastName}` : undefined,
+    topAssistId: assistP?.id,
     topAssistCount: assists[0]?.assists,
     topRatingName: ratingP ? `${ratingP.firstName} ${ratingP.lastName}` : undefined,
+    topRatingId: ratingP?.id,
     topRatingValue: ratings[0] ? averageRating(ratings[0]) : undefined,
     headline,
     body: bodyParts.join(" "),
+    quotes: buildSeasonEndQuotes(pack, save, {
+      place,
+      userClubId: save.clubId,
+      season: save.season,
+    }),
   };
 }
 

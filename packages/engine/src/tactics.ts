@@ -1,4 +1,4 @@
-import { primaryPosition, roleToLine } from "./labels";
+import { primaryPosition, ROLE_LABEL, roleToLine } from "./labels";
 import type {
   FormationId,
   Player,
@@ -30,35 +30,35 @@ export const FORMATION_SLOTS: Record<FormationId, import("./types").Position[]> 
 
 export const FORMATION_COORDS: Record<FormationId, { x: number; y: number }[]> = {
   "4-4-2": [
-    { x: 50, y: 5 },
-    { x: 12, y: 30 }, { x: 36, y: 27 }, { x: 64, y: 27 }, { x: 88, y: 30 },
-    { x: 12, y: 55 }, { x: 36, y: 52 }, { x: 64, y: 52 }, { x: 88, y: 55 },
-    { x: 34, y: 80 }, { x: 66, y: 80 },
+    { x: 50, y: 4 },
+    { x: 12, y: 28 }, { x: 36, y: 24 }, { x: 64, y: 24 }, { x: 88, y: 28 },
+    { x: 12, y: 56 }, { x: 36, y: 52 }, { x: 64, y: 52 }, { x: 88, y: 56 },
+    { x: 34, y: 86 }, { x: 66, y: 86 },
   ],
   "4-3-3": [
-    { x: 50, y: 5 },
-    { x: 12, y: 30 }, { x: 36, y: 27 }, { x: 64, y: 27 }, { x: 88, y: 30 },
-    { x: 24, y: 54 }, { x: 50, y: 50 }, { x: 76, y: 54 },
-    { x: 14, y: 78 }, { x: 50, y: 82 }, { x: 86, y: 78 },
+    { x: 50, y: 4 },
+    { x: 12, y: 28 }, { x: 36, y: 24 }, { x: 64, y: 24 }, { x: 88, y: 28 },
+    { x: 24, y: 56 }, { x: 50, y: 52 }, { x: 76, y: 56 },
+    { x: 14, y: 84 }, { x: 50, y: 88 }, { x: 86, y: 84 },
   ],
   "3-5-2": [
-    { x: 50, y: 5 },
-    { x: 24, y: 30 }, { x: 50, y: 27 }, { x: 76, y: 30 },
+    { x: 50, y: 4 },
+    { x: 24, y: 28 }, { x: 50, y: 24 }, { x: 76, y: 28 },
     { x: 8, y: 54 }, { x: 28, y: 60 }, { x: 50, y: 50 }, { x: 72, y: 60 }, { x: 92, y: 54 },
-    { x: 34, y: 82 }, { x: 66, y: 82 },
+    { x: 34, y: 86 }, { x: 66, y: 86 },
   ],
   "4-2-3-1": [
-    { x: 50, y: 5 },
-    { x: 12, y: 28 }, { x: 36, y: 25 }, { x: 64, y: 25 }, { x: 88, y: 28 },
+    { x: 50, y: 4 },
+    { x: 12, y: 26 }, { x: 36, y: 22 }, { x: 64, y: 22 }, { x: 88, y: 26 },
     { x: 34, y: 46 }, { x: 66, y: 46 },
-    { x: 14, y: 64 }, { x: 50, y: 62 }, { x: 86, y: 64 },
-    { x: 50, y: 82 },
+    { x: 14, y: 66 }, { x: 50, y: 64 }, { x: 86, y: 66 },
+    { x: 50, y: 88 },
   ],
   "5-3-2": [
-    { x: 50, y: 5 },
-    { x: 8, y: 32 }, { x: 28, y: 26 }, { x: 50, y: 24 }, { x: 72, y: 26 }, { x: 92, y: 32 },
-    { x: 24, y: 55 }, { x: 50, y: 52 }, { x: 76, y: 55 },
-    { x: 34, y: 80 }, { x: 66, y: 80 },
+    { x: 50, y: 4 },
+    { x: 8, y: 30 }, { x: 28, y: 24 }, { x: 50, y: 22 }, { x: 72, y: 24 }, { x: 92, y: 30 },
+    { x: 24, y: 56 }, { x: 50, y: 52 }, { x: 76, y: 56 },
+    { x: 34, y: 86 }, { x: 66, y: 86 },
   ],
 };
 
@@ -138,6 +138,32 @@ function disciplinePenalty(
   return -yellows * 1.5;
 }
 
+/** Contribution of a player in a formation slot (role fit + foot + OVR + cards). */
+export function slotContribution(player: Player, role: RoleId, ctx?: LineupContext): number {
+  return (
+    effectiveOverall(player, role) +
+    roleFitBonus(player, role) * 0.25 +
+    disciplinePenalty(player, ctx)
+  );
+}
+
+export function lineupContributionScore(
+  lineup: string[],
+  formation: FormationId,
+  players: Player[],
+  ctx?: LineupContext
+): number {
+  const roles = FORMATION_ROLES[formation];
+  const byId = new Map(players.map((p) => [p.id, p]));
+  let score = 0;
+  for (let i = 0; i < roles.length; i++) {
+    const p = byId.get(lineup[i] ?? "");
+    if (!p) continue;
+    score += slotContribution(p, roles[i]!, ctx);
+  }
+  return score;
+}
+
 function pickForSlot(
   pool: Player[],
   role: RoleId,
@@ -147,14 +173,88 @@ function pickForSlot(
   const ranked = pool
     .filter((p) => !used.has(p.id) && !(ctx?.exclude?.has(p.id)))
     .filter((p) => (ctx?.suspensions?.[p.id] ?? 0) <= 0)
-    .sort(
-      (a, b) =>
-        effectiveOverall(b, role) +
-        roleFitBonus(b, role) * 0.15 +
-        disciplinePenalty(b, ctx) -
-        (effectiveOverall(a, role) + roleFitBonus(a, role) * 0.15 + disciplinePenalty(a, ctx))
-    );
+    .sort((a, b) => slotContribution(b, role, ctx) - slotContribution(a, role, ctx));
   return ranked[0];
+}
+
+/** Greedy XI, then local swaps so bench cannot systematically outrate starters. */
+function improveLineup(
+  ids: string[],
+  squad: Player[],
+  formation: FormationId,
+  ctx?: LineupContext
+): string[] {
+  const roles = FORMATION_ROLES[formation];
+  const byId = new Map(squad.map((p) => [p.id, p]));
+  const lineup = ids.slice(0, 11);
+  while (lineup.length < 11) {
+    const filler = squad.find(
+      (p) =>
+        !lineup.includes(p.id) &&
+        !(ctx?.exclude?.has(p.id)) &&
+        (ctx?.suspensions?.[p.id] ?? 0) <= 0
+    );
+    if (!filler) break;
+    lineup.push(filler.id);
+  }
+
+  let improved = true;
+  let guard = 0;
+  while (improved && guard++ < 80) {
+    improved = false;
+    const used = new Set(lineup);
+    const bench = squad.filter(
+      (p) =>
+        !used.has(p.id) &&
+        !(ctx?.exclude?.has(p.id)) &&
+        (ctx?.suspensions?.[p.id] ?? 0) <= 0
+    );
+
+    // Starter ↔ bench
+    for (let i = 0; i < lineup.length; i++) {
+      const role = roles[i]!;
+      const out = byId.get(lineup[i]!);
+      if (!out) continue;
+      const outScore = slotContribution(out, role, ctx);
+      for (const bp of bench) {
+        if (role === "GK" && primaryPosition(bp) !== "GK") continue;
+        if (role !== "GK" && primaryPosition(bp) === "GK") continue;
+        const inScore = slotContribution(bp, role, ctx);
+        if (inScore <= outScore + 0.4) continue;
+        const bi = bench.indexOf(bp);
+        lineup[i] = bp.id;
+        if (bi >= 0) bench[bi] = out;
+        improved = true;
+        break;
+      }
+      if (improved) break;
+    }
+    if (improved) continue;
+
+    // Swap two starters across slots when both fit better
+    for (let i = 0; i < lineup.length; i++) {
+      for (let j = i + 1; j < lineup.length; j++) {
+        const a = byId.get(lineup[i]!);
+        const b = byId.get(lineup[j]!);
+        if (!a || !b) continue;
+        const ri = roles[i]!;
+        const rj = roles[j]!;
+        if (ri === "GK" || rj === "GK") continue;
+        const before =
+          slotContribution(a, ri, ctx) + slotContribution(b, rj, ctx);
+        const after =
+          slotContribution(b, ri, ctx) + slotContribution(a, rj, ctx);
+        if (after <= before + 0.4) continue;
+        const tmp = lineup[i]!;
+        lineup[i] = lineup[j]!;
+        lineup[j] = tmp;
+        improved = true;
+        break;
+      }
+      if (improved) break;
+    }
+  }
+  return lineup.slice(0, 11);
 }
 
 export function autoSelectLineup(
@@ -176,6 +276,7 @@ export function autoSelectLineup(
   }
   for (const p of [...squad]
     .filter((x) => (ctx?.suspensions?.[x.id] ?? 0) <= 0)
+    .filter((x) => !(ctx?.exclude?.has(x.id)))
     .sort((a, b) => b.overall - a.overall + disciplinePenalty(b, ctx) - disciplinePenalty(a, ctx))) {
     if (ids.length >= 11) break;
     if (!used.has(p.id)) {
@@ -183,7 +284,114 @@ export function autoSelectLineup(
       ids.push(p.id);
     }
   }
-  return ids.slice(0, 11);
+  return improveLineup(ids, squad, formation, ctx);
+}
+
+export type LineupStrengthHint = {
+  /** Short Russian tip for the manager UI. */
+  message: string;
+  outId?: string;
+  inId?: string;
+  role?: RoleId;
+  gain?: number;
+};
+
+/**
+ * Hints to strengthen XI using the same contribution rules as autoSelectLineup.
+ */
+export function analyzeLineupStrength(
+  players: Player[],
+  clubId: string,
+  tactics: TeamTactics,
+  ctx?: LineupContext
+): LineupStrengthHint[] {
+  const formation = tactics.formation ?? "4-3-3";
+  const roles = FORMATION_ROLES[formation];
+  const squad = players.filter((p) => p.clubId === clubId);
+  const byId = new Map(squad.map((p) => [p.id, p]));
+  const current = (tactics.lineup ?? []).slice(0, 11);
+  const optimal = autoSelectLineup(players, clubId, formation, ctx);
+  const hints: LineupStrengthHint[] = [
+    {
+      message:
+        "Сила слота = OVR с штрафом за чужую роль и «не ту» ногу на фланге, плюс бонус за родную роль. Карточки у порога бана снижают приоритет.",
+    },
+  ];
+
+  const currentScore = lineupContributionScore(current, formation, players, ctx);
+  const optimalScore = lineupContributionScore(optimal, formation, players, ctx);
+  if (optimalScore > currentScore + 1.5) {
+    hints.push({
+      message: `Автооснова сильнее текущей примерно на ${Math.round(optimalScore - currentScore)} усл. ед. Можно применить автоподбор.`,
+    });
+  } else {
+    hints.push({
+      message: "Текущая основа близка к оптимальной по правилам силы слотов.",
+    });
+  }
+
+  const used = new Set(current);
+  const bench = squad.filter(
+    (p) =>
+      !used.has(p.id) &&
+      !(ctx?.exclude?.has(p.id)) &&
+      (ctx?.suspensions?.[p.id] ?? 0) <= 0
+  );
+
+  const swaps: LineupStrengthHint[] = [];
+  for (let i = 0; i < Math.min(current.length, roles.length); i++) {
+    const role = roles[i]!;
+    const out = byId.get(current[i]!);
+    if (!out) continue;
+    const outScore = slotContribution(out, role, ctx);
+    const eff = effectiveOverall(out, role);
+    if (eff < out.overall - 2) {
+      hints.push({
+        message: `${out.lastName} на ${ROLE_LABEL[role]}: сила ${eff} при OVR ${out.overall} (не родная роль/нога).`,
+        outId: out.id,
+        role,
+      });
+    }
+    let best: { p: Player; gain: number } | null = null;
+    for (const bp of bench) {
+      if (role === "GK" && primaryPosition(bp) !== "GK") continue;
+      if (role !== "GK" && primaryPosition(bp) === "GK") continue;
+      const gain = slotContribution(bp, role, ctx) - outScore;
+      if (gain < 2) continue;
+      if (!best || gain > best.gain) best = { p: bp, gain };
+    }
+    if (best) {
+      swaps.push({
+        message: `Замените ${out.lastName} → ${best.p.lastName} (${ROLE_LABEL[role]}, +${best.gain.toFixed(0)} к слоту).`,
+        outId: out.id,
+        inId: best.p.id,
+        role,
+        gain: best.gain,
+      });
+    }
+  }
+
+  swaps.sort((a, b) => (b.gain ?? 0) - (a.gain ?? 0));
+  hints.push(...swaps.slice(0, 5));
+  if (swaps.length === 0 && optimalScore <= currentScore + 1.5) {
+    hints.push({ message: "Явных усиливающих замен со скамейки нет." });
+  }
+  return hints;
+}
+
+/** Rebuild XI with the same logic as auto-lineup (for «применить подсказки»). */
+export function applyOptimalLineup(
+  players: Player[],
+  clubId: string,
+  tactics: TeamTactics,
+  ctx?: LineupContext
+): TeamTactics {
+  const formation = tactics.formation ?? "4-3-3";
+  return {
+    ...tactics,
+    formation,
+    lineup: autoSelectLineup(players, clubId, formation, ctx),
+  };
 }
 
 export function defaultTactics(
@@ -254,17 +462,9 @@ export function scoreFormationFit(
   ctx?: LineupContext
 ): number {
   const lineup = autoSelectLineup(players, clubId, formation, ctx);
-  const roles = FORMATION_ROLES[formation];
-  let score = 0;
-  for (let i = 0; i < roles.length; i++) {
-    const p = players.find((x) => x.id === lineup[i]);
-    if (!p) continue;
-    const role = roles[i]!;
-    score += effectiveOverall(p, role) + roleFitBonus(p, role) * 0.25;
-  }
+  const score = lineupContributionScore(lineup, formation, players, ctx);
   // Prefer full XI
-  score += lineup.length * 2;
-  return Math.round(score * 10) / 10;
+  return Math.round((score + lineup.length * 2) * 10) / 10;
 }
 
 /**

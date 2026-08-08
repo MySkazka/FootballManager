@@ -40,7 +40,7 @@ const styles = StyleSheet.create({
     lineHeight: 14,
   },
   code: {
-    color: "#C8D5CC",
+    color: "rgba(255,255,255,0.72)",
     fontSize: 12,
     fontWeight: "700",
     letterSpacing: 0.6,

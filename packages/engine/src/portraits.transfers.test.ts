@@ -4,9 +4,13 @@ import {
   PLAYER_PORTRAIT_ALLOWLIST,
   PLAYER_PORTRAIT_BLOCKLIST,
   PORTRAIT_COUNT,
+  COACH_DEDICATED_PORTRAIT_COUNT,
+  COACH_FACE_PORTRAIT_IDS,
   assignSquadPortraits,
+  coachPortraitPoolSize,
   isValidPortraitId,
   portraitIdForPlayer,
+  portraitSlotForStaff,
 } from "./portraits";
 import { Rng } from "./rng";
 import { newsFromMatch } from "./news";
@@ -22,12 +26,15 @@ import {
 import type { Club, Fixture, MatchResult, WorldPack } from "./types";
 
 describe("player portrait allowlist", () => {
-  it("blocks female/elderly IDs from players", () => {
+  it("blocks female/elderly/childlike IDs from players", () => {
     for (const id of PLAYER_PORTRAIT_BLOCKLIST) {
       assert.equal(isValidPortraitId(id), false);
       assert.ok(!PLAYER_PORTRAIT_ALLOWLIST.includes(id));
     }
     assert.equal(PLAYER_PORTRAIT_ALLOWLIST.length, PORTRAIT_COUNT - PLAYER_PORTRAIT_BLOCKLIST.length);
+    // Screenshot matches: freckled blond yellow + bowl-cut blue
+    assert.ok(PLAYER_PORTRAIT_BLOCKLIST.includes(74));
+    assert.ok(PLAYER_PORTRAIT_BLOCKLIST.includes(54));
   });
 
   it("never assigns blocked IDs in squad or seed lookup", () => {
@@ -41,6 +48,38 @@ describe("player portrait allowlist", () => {
       const id = portraitIdForPlayer("BRA", `seed-${i}`);
       assert.ok(isValidPortraitId(id));
     }
+  });
+});
+
+describe("coach staff portrait slots", () => {
+  it("keeps pool large and excludes female-looking blocked faces from coach faces only when not STAFF_EXEC", () => {
+    assert.ok(coachPortraitPoolSize() >= 24);
+    assert.equal(
+      coachPortraitPoolSize(),
+      COACH_DEDICATED_PORTRAIT_COUNT + COACH_FACE_PORTRAIT_IDS.length
+    );
+    // Female-looking / childlike blocklist entries must not enter the coach face pack.
+    for (const id of [77, 80, 0, 3, 4, 54, 74, 94]) {
+      assert.ok(!COACH_FACE_PORTRAIT_IDS.includes(id));
+    }
+  });
+
+  it("gives eng-forest and eng-sky different coach slots (screenshot pair)", () => {
+    const pool = coachPortraitPoolSize();
+    const peers = ["eng-forest", "eng-sky"];
+    const a = portraitSlotForStaff("coach", "eng-forest", pool, peers);
+    const b = portraitSlotForStaff("coach", "eng-sky", pool, peers);
+    assert.notEqual(a, b);
+    // Stable per clubId alone once pool is large enough / peers remapped.
+    assert.equal(a, portraitSlotForStaff("coach", "eng-forest", pool, peers));
+    assert.equal(b, portraitSlotForStaff("coach", "eng-sky", pool, peers));
+  });
+
+  it("guarantees unique slots among peers while pool allows", () => {
+    const pool = coachPortraitPoolSize();
+    const peers = Array.from({ length: Math.min(12, pool) }, (_, i) => `club-${i}`);
+    const slots = peers.map((id) => portraitSlotForStaff("coach", id, pool, peers));
+    assert.equal(new Set(slots).size, peers.length);
   });
 });
 

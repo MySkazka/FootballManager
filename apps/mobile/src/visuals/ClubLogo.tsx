@@ -5,11 +5,15 @@ import Svg, {
   Ellipse,
   G,
   Line,
+  LinearGradient,
   Path,
   Polygon,
+  RadialGradient,
   Rect,
+  Stop,
   Text as SvgText,
 } from "react-native-svg";
+import { View, StyleSheet } from "react-native";
 import type { Club } from "@fm/engine";
 
 type FrameKind = "roundel" | "heater" | "rounded" | "diamond" | "oval" | "banner";
@@ -664,6 +668,8 @@ function Ribbon({
 /**
  * Procedural football crest — heraldic frames, 2-color fields, motif glyphs.
  * Stable per club.id; inspired by badge collage style, never a 1:1 real trademark.
+ * Drawn with a soft 3D / enamel look (chrome rim, specular, glow) without changing
+ * the badge silhouette or heraldry.
  */
 export function ClubLogo({
   club,
@@ -681,10 +687,16 @@ export function ClubLogo({
 
   const frame = pickFrame(h);
   const field = pickField(h2);
-  const clipId = `crest-clip-${club.id.replace(/[^a-zA-Z0-9_-]/g, "")}-${h.toString(36)}-${size}`;
+  const safeId = club.id.replace(/[^a-zA-Z0-9_-]/g, "");
+  const clipId = `crest-clip-${safeId}-${h.toString(36)}-${size}`;
+  const glossId = `crest-gloss-${safeId}-${h.toString(36)}-${size}`;
+  const glowId = `crest-glow-${safeId}-${h.toString(36)}-${size}`;
+  const sheenId = `crest-sheen-${safeId}-${h.toString(36)}-${size}`;
 
-  // High-contrast rim so badges pop on dark UI
+  // High-contrast rim so badges pop on dark UI — warm metal for 3D bevel
   const border = isLight(primary) ? "#121212" : "#F2E6B8";
+  const chromeHi = "#F4E2A8";
+  const chromeLo = "#8A6A28";
   const motifColor = contrastOn(
     field === "halves" || field === "quarters" || field === "stripes" ? primary : primary,
     secondary,
@@ -701,52 +713,120 @@ export function ClubLogo({
   const showInnerRing = frame === "roundel" || frame === "oval";
 
   return (
-    <Svg width={size} height={size} viewBox="0 0 64 64">
-      <Defs>
-        <ClipShape kind={frame} id={clipId} />
-      </Defs>
+    <View
+      style={[
+        styles.crestShell,
+        {
+          width: size,
+          height: size,
+          shadowColor: primary,
+        },
+      ]}
+      pointerEvents="none"
+    >
+      <Svg width={size} height={size} viewBox="0 0 64 64">
+        <Defs>
+          <ClipShape kind={frame} id={clipId} />
+          <RadialGradient id={glowId} cx="50%" cy="48%" rx="52%" ry="52%">
+            <Stop offset="0" stopColor={primary} stopOpacity="0.35" />
+            <Stop offset="0.55" stopColor={secondary} stopOpacity="0.12" />
+            <Stop offset="1" stopColor={primary} stopOpacity="0" />
+          </RadialGradient>
+          <LinearGradient id={glossId} x1="0.2" y1="0" x2="0.85" y2="1">
+            <Stop offset="0" stopColor="#FFFFFF" stopOpacity="0.42" />
+            <Stop offset="0.28" stopColor="#FFFFFF" stopOpacity="0.12" />
+            <Stop offset="0.55" stopColor="#FFFFFF" stopOpacity="0" />
+            <Stop offset="1" stopColor="#000000" stopOpacity="0.22" />
+          </LinearGradient>
+          <RadialGradient id={sheenId} cx="32%" cy="28%" rx="42%" ry="36%">
+            <Stop offset="0" stopColor="#FFFFFF" stopOpacity="0.55" />
+            <Stop offset="0.45" stopColor="#FFFFFF" stopOpacity="0.12" />
+            <Stop offset="1" stopColor="#FFFFFF" stopOpacity="0" />
+          </RadialGradient>
+        </Defs>
 
-      {/* Crisp outer halo for list readability on dark backgrounds */}
-      <Circle cx="32" cy="32" r="31" fill="#000000" opacity={0.35} />
+        {/* Soft colored aura behind the badge */}
+        <Circle cx="32" cy="33" r="31" fill={`url(#${glowId})`} />
 
-      <FrameOutline kind={frame} fill={primary} stroke={border} strokeWidth={3.2} />
-      <FieldPattern kind={field} primary={primary} secondary={secondary} clipId={clipId} />
+        {/* Drop shadow for depth */}
+        <G opacity={0.35} transform="translate(1.2, 2.2)">
+          <FrameOutline kind={frame} fill="#000000" stroke="#000000" strokeWidth={2} />
+        </G>
 
-      {/* Inner track on roundels — classic football badge feel */}
-      {showInnerRing && (
-        <Circle
-          cx="32"
-          cy="30"
-          r="22"
-          fill="none"
-          stroke={border}
-          strokeWidth="1.8"
+        {/* Chrome bevel ring */}
+        <FrameOutline kind={frame} fill={chromeLo} stroke={chromeHi} strokeWidth={4.2} />
+        <FrameOutline kind={frame} fill={primary} stroke={border} strokeWidth={2.4} />
+        <FieldPattern kind={field} primary={primary} secondary={secondary} clipId={clipId} />
+
+        {/* Enamel gloss over the field */}
+        <Rect
+          x="0"
+          y="0"
+          width="64"
+          height="64"
+          fill={`url(#${glossId})`}
+          clipPath={`url(#${clipId})`}
           opacity={0.85}
         />
-      )}
+        <Ellipse
+          cx="24"
+          cy="20"
+          rx="14"
+          ry="10"
+          fill={`url(#${sheenId})`}
+          clipPath={`url(#${clipId})`}
+        />
 
-      {/* Prestige stars (not tied to any real club star count trademark) */}
-      {showStars && (
-        <G>
-          <Polygon points="32,5 33.2,8 36.5,8 33.8,10 34.8,13 32,11.2 29.2,13 30.2,10 27.5,8 30.8,8" fill={border} />
-        </G>
-      )}
+        {/* Inner track on roundels — classic football badge feel */}
+        {showInnerRing && (
+          <Circle
+            cx="32"
+            cy="30"
+            r="22"
+            fill="none"
+            stroke={chromeHi}
+            strokeWidth="1.6"
+            opacity={0.75}
+          />
+        )}
 
-      {/* Motif — scale around crest center so glyphs fit the disc */}
-      {useDisc ? (
-        <G>
-          <Circle cx="32" cy="27" r="13.5" fill={discFill} stroke={border} strokeWidth="1.2" />
-          <G transform="translate(32, 27) scale(0.7) translate(-32, -30)">
-            <MotifGlyph motif={motif} color={discMotif} accent={border} />
+        {/* Prestige stars (not tied to any real club star count trademark) */}
+        {showStars && (
+          <G>
+            <Polygon
+              points="32,5 33.2,8 36.5,8 33.8,10 34.8,13 32,11.2 29.2,13 30.2,10 27.5,8 30.8,8"
+              fill={chromeHi}
+              stroke={chromeLo}
+              strokeWidth="0.5"
+            />
           </G>
-        </G>
-      ) : (
-        <G transform="translate(32, 26) scale(0.85) translate(-32, -30)">
-          <MotifGlyph motif={motif} color={motifColor} accent={border} />
-        </G>
-      )}
+        )}
 
-      <Ribbon letters={letters} fill={ribbonFill} text={ribbonText} />
-    </Svg>
+        {/* Motif — scale around crest center so glyphs fit the disc */}
+        {useDisc ? (
+          <G>
+            <Circle cx="32" cy="27" r="13.5" fill={discFill} stroke={border} strokeWidth="1.2" />
+            <G transform="translate(32, 27) scale(0.7) translate(-32, -30)">
+              <MotifGlyph motif={motif} color={discMotif} accent={border} />
+            </G>
+          </G>
+        ) : (
+          <G transform="translate(32, 26) scale(0.85) translate(-32, -30)">
+            <MotifGlyph motif={motif} color={motifColor} accent={border} />
+          </G>
+        )}
+
+        <Ribbon letters={letters} fill={ribbonFill} text={ribbonText} />
+      </Svg>
+    </View>
   );
 }
+
+const styles = StyleSheet.create({
+  crestShell: {
+    shadowOpacity: 0.45,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 6,
+  },
+});

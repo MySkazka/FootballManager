@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildClubHistory, buildWorldHonoursLedger } from "./clubHistory";
+import {
+  buildClubHistory,
+  buildWorldHonoursLedger,
+  groupHonoursForDisplay,
+  timesHolderPhrase,
+} from "./clubHistory";
 import type { WorldPack } from "./types";
 
 const pack: WorldPack = {
@@ -89,6 +94,37 @@ const pack: WorldPack = {
   ],
 } as unknown as WorldPack;
 
+/** Years listed in a grouped honour line, e.g. `(2001, 2004, 2020)`. */
+function yearsInHonourLine(honour: string): number[] {
+  const m = honour.match(/\(([^)]+)\)\s*$/);
+  if (!m) return [];
+  return m[1]!
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n >= 1000);
+}
+
+describe("groupHonoursForDisplay", () => {
+  it("groups same competition into one line with ascending years", () => {
+    const lines = groupHonoursForDisplay([
+      "Чемпион страны (2004)",
+      "Чемпион страны (2001)",
+      "Чемпион страны (2020)",
+      "Обладатель кубка (2010)",
+    ]);
+    assert.deepEqual(lines, [
+      "Чемпион страны. 3-кратный обладатель (2001, 2004, 2020)",
+      "Обладатель кубка (2010)",
+    ]);
+  });
+
+  it("uses N-кратный only for counts ≥ 2", () => {
+    assert.equal(timesHolderPhrase(1), "");
+    assert.equal(timesHolderPhrase(2), "2-кратный обладатель");
+    assert.equal(timesHolderPhrase(5), "5-кратный обладатель");
+  });
+});
+
 describe("buildClubHistory honours years", () => {
   it("never awards trophies in the unfinished pack season or later", () => {
     const seasonStart = parseInt(pack.season.slice(0, 4), 10);
@@ -96,13 +132,14 @@ describe("buildClubHistory honours years", () => {
       const history = buildClubHistory(pack, club.id);
       assert.ok(history);
       for (const honour of history!.honours) {
-        const m = honour.match(/\((\d{4})\)\s*$/);
-        assert.ok(m, `expected year in honour: ${honour}`);
-        const year = Number(m![1]);
-        assert.ok(
-          year < seasonStart,
-          `${club.name}: "${honour}" must be before season ${pack.season}`
-        );
+        const years = yearsInHonourLine(honour);
+        assert.ok(years.length > 0, `expected years in honour: ${honour}`);
+        for (const year of years) {
+          assert.ok(
+            year < seasonStart,
+            `${club.name}: "${honour}" must be before season ${pack.season}`
+          );
+        }
       }
     }
   });
@@ -111,8 +148,9 @@ describe("buildClubHistory honours years", () => {
     const history = buildClubHistory(pack, "c1");
     assert.ok(history);
     for (const honour of history!.honours) {
-      const year = Number(honour.match(/\((\d{4})\)\s*$/)?.[1]);
-      assert.ok(year <= 2024);
+      for (const year of yearsInHonourLine(honour)) {
+        assert.ok(year <= 2024);
+      }
     }
   });
 
@@ -147,5 +185,29 @@ describe("buildClubHistory honours years", () => {
       h.startsWith("Суперкубок") ||
       h.startsWith("Победитель еврокубка");
     assert.equal(low.honours.filter(major).length, 0);
+  });
+
+  it("returns one display line per competition with grouped years", () => {
+    const history = buildClubHistory(pack, "c1")!;
+    assert.ok(history.honours.length > 0);
+    const comps = new Set<string>();
+    for (const honour of history.honours) {
+      const years = yearsInHonourLine(honour);
+      assert.ok(years.length > 0, `expected years in honour: ${honour}`);
+      assert.deepEqual(years, [...years].sort((a, b) => a - b));
+      if (years.length === 1) {
+        const m = honour.match(/^(.+) \(\d{4}\)$/);
+        assert.ok(m, `expected singular format: ${honour}`);
+        assert.ok(!honour.includes(". "), `singular must not use multiplicity: ${honour}`);
+        assert.ok(!comps.has(m![1]!), `duplicate competition line: ${m![1]}`);
+        comps.add(m![1]!);
+      } else {
+        const m = honour.match(/^(.+)\. .+ \(([^)]+)\)$/);
+        assert.ok(m, `expected grouped format: ${honour}`);
+        assert.ok(!comps.has(m![1]!), `duplicate competition line: ${m![1]}`);
+        comps.add(m![1]!);
+        assert.match(honour, new RegExp(`\\. ${years.length}-кратный обладатель \\(`));
+      }
+    }
   });
 });

@@ -1,5 +1,5 @@
 import type { CareerSave, Club, Player, WorldPack } from "./types";
-import { primaryPosition } from "./labels";
+import { formatWage, primaryPosition } from "./labels";
 import { autoSelectLineup } from "./tactics";
 
 function leagueOfClub(pack: WorldPack, clubId: string) {
@@ -218,7 +218,7 @@ export function evaluateWageAffordability(
       ok: false,
       wageBill,
       budget,
-      message: `Игрок требует неадекватную зарплату (${playerWage.toFixed(2)} млн/сез) относительно бюджета клуба.`,
+      message: `Игрок требует неадекватную зарплату (${formatWage(playerWage)}) относительно бюджета клуба.`,
     };
   }
   return { ok: true, wageBill, budget };

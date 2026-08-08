@@ -208,14 +208,35 @@ export function clubTitleLines(club: Club): { title: string; subtitle: string } 
   return { title: club.name, subtitle: club.city };
 }
 
+/**
+ * Readable club label for dense UI (league table, chips).
+ * Prefers shortName when it is more than a 3-letter code; otherwise full name.
+ * Truncates with ellipsis around maxLen (default 16).
+ */
+export function clubTableLabel(
+  club: Pick<Club, "name" | "shortName">,
+  maxLen = 16
+): string {
+  const short = (club.shortName || "").trim();
+  const full = (club.name || "").trim();
+  // Codes like MAN / СБГ / ЖД are too aggressive — fall back to full name.
+  const raw = short.length > 3 ? short : full || short;
+  if (!raw) return "—";
+  if (raw.length <= maxLen) return raw;
+  return `${raw.slice(0, Math.max(1, maxLen - 1)).trimEnd()}…`;
+}
+
+/** In-world currency: millions of euros (European football sim). */
+export const MONEY_CURRENCY = "€";
+
 export function formatMarketValue(value: number | undefined | null): string {
   const n = typeof value === "number" && Number.isFinite(value) ? value : 0;
   const rounded = Math.round(n * 10) / 10;
   const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1).replace(".", ",");
-  return `${text} млн`;
+  return `${text} млн ${MONEY_CURRENCY}`;
 }
 
-/** Seasonal wage in abstract millions (зарплата). */
+/** Seasonal wage in millions of euros. */
 export function formatWage(value: number | undefined | null): string {
   const n = typeof value === "number" && Number.isFinite(value) ? value : 0;
   const rounded = Math.round(n * 100) / 100;
@@ -223,7 +244,7 @@ export function formatWage(value: number | undefined | null): string {
     Number.isInteger(rounded) || Math.abs(rounded * 10 - Math.round(rounded * 10)) < 1e-9
       ? (Math.round(rounded * 10) / 10).toFixed(1).replace(".", ",")
       : rounded.toFixed(2).replace(".", ",");
-  return `${text} млн/сез`;
+  return `${text} млн ${MONEY_CURRENCY}/сез`;
 }
 
 export function keyAttributes(player: Player): (keyof PlayerAttributes)[] {

@@ -5,6 +5,7 @@ import {
   buildSeasonAwards,
   isUserLeagueComplete,
   seasonAwardsNews,
+  userLeagueId,
   type SeasonAwards,
 } from "./development";
 import {
@@ -35,7 +36,7 @@ import {
   rollRolesAndFoot,
 } from "./players";
 import { assignSquadPortraits, isValidPortraitId, portraitIdForPlayer, PORTRAIT_SCHEMA } from "./portraits";
-import { primaryPosition } from "./labels";
+import { formatMarketValue, primaryPosition } from "./labels";
 import { Rng } from "./rng";
 import { applyMatchToSeasonStats } from "./stats";
 import { defaultTactics, autoSelectLineup, optimalTactics } from "./tactics";
@@ -43,9 +44,11 @@ import {
   buildTransferWindows,
   detectClosedTransferWindow,
   expireStaleIncomingOffers,
+  expireStaleOutgoingOffers,
   generateIncomingTransferOffers,
   isTransferWindowOpen,
   resolveExpiredLoans,
+  resolveOutgoingTransferOffers,
   seedClubFinances,
   simulateAiTransfers,
 } from "./transfers";
@@ -59,6 +62,12 @@ import {
   registerEuroParticipants,
   seedUefaState,
 } from "./uefa";
+import {
+  enrichDramaNewsPlayerIds,
+  normalizeSquadDramas,
+  noteSquadDramaMatchStarts,
+  tickSquadDramas,
+} from "./squadDrama";
 import type {
   CareerSave,
   Club,
@@ -170,6 +179,7 @@ export function createCareer(
     clubFinances: seedClubFinances(pack),
     transferWindows: buildTransferWindows(pack.season),
     suspensions: {},
+    squadDramas: [],
     pendingAcademy: [],
     transferLog: [],
     incomingTransferOffers: [],
@@ -452,7 +462,8 @@ export function normalizeCareerSave(pack: WorldPack, raw: unknown): CareerSave |
     }
   }
 
-  return {
+  const squadDramas = normalizeSquadDramas(s.squadDramas);
+  const draft: CareerSave = {
     id: typeof s.id === "string" ? s.id : `save-migrated-${s.clubId}`,
     managerName: typeof s.managerName === "string" ? s.managerName : "Менеджер",
     clubId: s.clubId,
@@ -467,6 +478,7 @@ export function normalizeCareerSave(pack: WorldPack, raw: unknown): CareerSave |
     clubFinances,
     transferWindows,
     suspensions,
+    squadDramas,
     seasonResolved: s.seasonResolved === true,
     pendingAcademy: Array.isArray(s.pendingAcademy) ? (s.pendingAcademy as Player[]) : [],
     transferLog: Array.isArray(s.transferLog) ? s.transferLog : [],
@@ -479,6 +491,19 @@ export function normalizeCareerSave(pack: WorldPack, raw: unknown): CareerSave |
             typeof (o as { playerId?: unknown }).playerId === "string" &&
             typeof (o as { buyingClubId?: unknown }).buyingClubId === "string" &&
             typeof (o as { fee?: unknown }).fee === "number"
+        )
+      : [],
+    outgoingTransferOffers: Array.isArray(s.outgoingTransferOffers)
+      ? s.outgoingTransferOffers.filter(
+          (o) =>
+            o &&
+            typeof o === "object" &&
+            typeof (o as { id?: unknown }).id === "string" &&
+            typeof (o as { playerId?: unknown }).playerId === "string" &&
+            typeof (o as { sellingClubId?: unknown }).sellingClubId === "string" &&
+            typeof (o as { fee?: unknown }).fee === "number" &&
+            ((o as { kind?: unknown }).kind === "buy" ||
+              (o as { kind?: unknown }).kind === "loan")
         )
       : [],
     pendingWindowReport: s.pendingWindowReport ?? null,
@@ -498,6 +523,8 @@ export function normalizeCareerSave(pack: WorldPack, raw: unknown): CareerSave |
     })(),
     uefa,
   };
+  enrichDramaNewsPlayerIds(draft);
+  return draft;
 }
 
 function clubMap(pack: WorldPack): Map<string, Club> {
@@ -566,8 +593,8 @@ function commitFixture(
         category: "insight",
         headline: mineHome ? "Касса матча" : "Выездные поступления",
         body: mineHome
-          ? `Билеты, атрибутика и спонсоры принесли клубу около ${earned.toFixed(1)} млн после домашнего матча.`
-          : `Клуб получил около ${earned.toFixed(1)} млн (доля от матча, ТВ и бонусы).`,
+          ? `Билеты, атрибутика и спонсоры принесли клубу около ${formatMarketValue(earned)} после домашнего матча.`
+          : `Клуб получил около ${formatMarketValue(earned)} (доля от матча, ТВ и бонусы).`,
         relatedClubIds: [next.clubId],
       });
     }
@@ -602,6 +629,13 @@ function commitFixture(
   }
 
   next.news.unshift(...newsFromMatch(fixture, result, home, away, next.players, rng));
+
+  const userInMatch = fixture.homeClubId === next.clubId || fixture.awayClubId === next.clubId;
+  if (userInMatch) {
+    const userLineup =
+      fixture.homeClubId === next.clubId ? homeLineup : awayLineup;
+    noteSquadDramaMatchStarts(next, userLineup, next.clubId);
+  }
 }
 
 function bumpDate(save: CareerSave, pack?: WorldPack): void {
@@ -611,7 +645,10 @@ function bumpDate(save: CareerSave, pack?: WorldPack): void {
   save.currentDate = d.toISOString().slice(0, 10);
   save.news = save.news.slice(0, 100);
   detectClosedTransferWindow(save, previous);
-  if (pack) resolveExpiredLoans(pack, save);
+  if (pack) {
+    resolveOutgoingTransferOffers(pack, save);
+    resolveExpiredLoans(pack, save);
+  }
 }
 
 export function findUserFixtureOnDate(save: CareerSave, date: string): Fixture | undefined {
@@ -661,7 +698,10 @@ export function advanceDay(pack: WorldPack, save: CareerSave, seed: number): Day
     );
   } else {
     expireStaleIncomingOffers(next);
+    expireStaleOutgoingOffers(next);
   }
+
+  tickSquadDramas(pack, next, rng);
 
   if (userFixture) {
     return {
@@ -818,6 +858,103 @@ export function completeSeason(
   return { save: next, awards };
 }
 
+/** "2025/26" → "2026/27" */
+export function bumpSeasonLabel(season: string): string {
+  const m = season.match(/^(\d{4})\s*[/\-]\s*(\d{2,4})$/);
+  if (m) {
+    const y1 = Number(m[1]) + 1;
+    const y2raw = m[2]!;
+    if (y2raw.length === 2) {
+      const y2 = (Number(y2raw) + 1) % 100;
+      return `${y1}/${String(y2).padStart(2, "0")}`;
+    }
+    return `${y1}/${Number(y2raw) + 1}`;
+  }
+  const y = Number(season.slice(0, 4));
+  if (Number.isFinite(y) && y > 1900) {
+    return `${y + 1}/${String((y + 2) % 100).padStart(2, "0")}`;
+  }
+  return season;
+}
+
+function finalizeUefaSeason(state: ReturnType<typeof ensureUefaState>): void {
+  for (const fedId of Object.keys(state.history)) {
+    const cur = state.current[fedId];
+    const score =
+      cur && cur.clubs > 0 ? Math.round((cur.points / cur.clubs) * 1000) / 1000 : 0;
+    const hist = [...(state.history[fedId] ?? []), score].slice(-5);
+    state.history[fedId] = hist;
+    state.current[fedId] = { points: 0, clubs: 0 };
+  }
+}
+
+/**
+ * After awards / academy: roll calendar, empty tables, fresh fixtures for the next campaign.
+ */
+export function startNextSeason(pack: WorldPack, save: CareerSave): CareerSave {
+  if (!save.seasonResolved) return save;
+
+  const nextSeason = bumpSeasonLabel(save.season);
+  const seasonStart = seasonStartFromPack(pack, nextSeason);
+
+  const uefa = structuredClone(ensureUefaState(pack, save));
+  finalizeUefaSeason(uefa);
+
+  let fixtures = pack.leagues.flatMap((l) =>
+    buildLeagueFixtures(l.id, [...new Set(l.clubIds)], seasonStart, 7)
+  );
+  fixtures = ensureContinentalFixtures(fixtures, pack, seasonStart, uefa);
+  fixtures.sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+  registerEuroParticipants(uefa, pack, fixtures);
+
+  const table: CareerSave["table"] = {};
+  for (const league of pack.leagues) {
+    table[league.id] = [...new Set(league.clubIds)].map(emptyRow);
+  }
+
+  const club = pack.clubs.find((c) => c.id === save.clubId);
+  const news: CareerSave["news"] = [
+    {
+      id: `news-new-season-${nextSeason}`,
+      date: seasonStart,
+      category: "insight",
+      headline: `Новый сезон ${nextSeason}`,
+      body: `Чемпионат стартует. «${club?.name ?? "Клуб"}» готовится к первой игре — таблица обнулена.`,
+      relatedClubIds: [save.clubId],
+    },
+    ...save.news.slice(0, 60),
+  ];
+  const lastWarn = lastSeasonWarningNews(seasonStart, save.players, save.clubId);
+  if (lastWarn) news.unshift(lastWarn);
+
+  const next: CareerSave = {
+    ...save,
+    season: nextSeason,
+    currentDate: seasonStart,
+    fixtures,
+    table,
+    news,
+    playerStats: {},
+    suspensions: {},
+    transferWindows: buildTransferWindows(nextSeason),
+    transferLog: [],
+    incomingTransferOffers: [],
+    outgoingTransferOffers: [],
+    pendingWindowReport: null,
+    pendingAcademy: [],
+    seasonResolved: false,
+    uefa,
+    userTactics: defaultTactics(save.players, save.clubId, save.userTactics?.formation ?? "4-3-3", {
+      suspensions: {},
+    }),
+    seasonStartMarketValues: {},
+  };
+
+  resolveExpiredLoans(pack, next);
+  next.seasonStartMarketValues = snapshotSeasonStartValues(next);
+  return next;
+}
+
 export function seasonIsReadyToAward(pack: WorldPack, save: CareerSave): boolean {
   if (save.seasonResolved) return false;
   const userDone = !save.fixtures.some(
@@ -825,6 +962,166 @@ export function seasonIsReadyToAward(pack: WorldPack, save: CareerSave): boolean
       !f.result && (f.homeClubId === save.clubId || f.awayClubId === save.clubId)
   );
   return userDone || isUserLeagueComplete(pack, save);
+}
+
+/** Unique sorted matchday dates for a tournament (typically the user league). */
+export function leagueMatchdayDates(save: CareerSave, leagueId: string): string[] {
+  const dates = new Set<string>();
+  for (const f of save.fixtures) {
+    if (f.tournamentId === leagueId) dates.add(f.date);
+  }
+  return [...dates].sort();
+}
+
+/**
+ * How many user-league matchdays still have at least one unfinished fixture.
+ */
+export function unfinishedLeagueMatchdaysLeft(pack: WorldPack, save: CareerSave): number {
+  const leagueId = userLeagueId(pack, save.clubId);
+  if (!leagueId) return 0;
+  const dates = leagueMatchdayDates(save, leagueId);
+  let left = 0;
+  for (const date of dates) {
+    const open = save.fixtures.some(
+      (f) => f.tournamentId === leagueId && f.date === date && !f.result
+    );
+    if (open) left += 1;
+  }
+  return left;
+}
+
+/**
+ * Bulk-simulate everything before the last `remaining` user-league matchdays
+ * so the calendar sits ~3 rounds from the title race / season awards flow.
+ * Does not run end-of-season aging or awards (`seasonResolved` stays false).
+ *
+ * Uses a lightweight score model (no live minute sim) so debug jumps stay responsive.
+ */
+export function fastForwardToLeagueMatchdaysLeft(
+  pack: WorldPack,
+  save: CareerSave,
+  remaining = 3,
+  seed = 1000
+): CareerSave {
+  return runNearSeasonEnd(pack, save, remaining, seed);
+}
+
+/**
+ * Yields once so the UI can paint a busy state, then runs the lightweight jump.
+ */
+export async function fastForwardToLeagueMatchdaysLeftAsync(
+  pack: WorldPack,
+  save: CareerSave,
+  remaining = 3,
+  seed = 1000
+): Promise<CareerSave> {
+  await new Promise<void>((r) => setTimeout(r, 0));
+  return runNearSeasonEnd(pack, save, remaining, seed);
+}
+
+function poissonSample(lambda: number, rng: Rng): number {
+  const L = Math.exp(-Math.max(0.05, lambda));
+  let k = 0;
+  let p = 1;
+  do {
+    k += 1;
+    p *= rng.next();
+  } while (p > L && k < 12);
+  return k - 1;
+}
+
+/** Cheap AI result for bulk calendar jumps — standings only, no live engine. */
+function simulateMatchQuick(home: Club, away: Club, rng: Rng): MatchResult {
+  const edge = (home.reputation - away.reputation) / 45;
+  const homeGoals = poissonSample(1.25 + edge + 0.12, rng);
+  const awayGoals = poissonSample(1.1 - edge, rng);
+  return {
+    homeGoals,
+    awayGoals,
+    homeShots: homeGoals + rng.int(4, 11),
+    awayShots: awayGoals + rng.int(3, 10),
+    events: [],
+  };
+}
+
+function commitFixtureStandingsOnly(
+  next: CareerSave,
+  fixture: Fixture,
+  result: MatchResult
+): void {
+  fixture.result = result;
+  const leagueTable = next.table[fixture.tournamentId];
+  if (!leagueTable) return;
+  applyResult(leagueTable, fixture.homeClubId, fixture.awayClubId, result.homeGoals, result.awayGoals);
+  leagueTable.sort((a, b) => b.points - a.points || b.gf - b.ga - (a.gf - a.ga));
+}
+
+function runNearSeasonEnd(
+  pack: WorldPack,
+  save: CareerSave,
+  remaining: number,
+  seed: number
+): CareerSave {
+  const leagueId = userLeagueId(pack, save.clubId);
+  if (!leagueId || remaining < 1) {
+    return { ...save, fixtures: save.fixtures.slice(), news: save.news.slice() };
+  }
+
+  const leagueDates = leagueMatchdayDates(save, leagueId);
+  if (leagueDates.length === 0) {
+    return { ...save, fixtures: save.fixtures.slice(), news: save.news.slice() };
+  }
+
+  const keep = Math.min(remaining, leagueDates.length);
+  const cutoff = leagueDates[leagueDates.length - keep]!;
+
+  const alreadyLeft = unfinishedLeagueMatchdaysLeft(pack, save);
+  if (alreadyLeft <= keep) {
+    return {
+      ...save,
+      seasonResolved: false,
+      currentDate: save.currentDate > cutoff ? cutoff : save.currentDate,
+      fixtures: save.fixtures.slice(),
+      news: save.news.slice(),
+    };
+  }
+
+  // Avoid structuredClone of ~3k players — only copy fixtures we mutate + standings.
+  const next: CareerSave = {
+    ...save,
+    seasonResolved: false,
+    fixtures: save.fixtures.map((f) =>
+      !f.result && f.date < cutoff ? { ...f } : f
+    ),
+    table: structuredClone(save.table),
+    news: save.news.slice(),
+  };
+
+  const rng = new Rng(seed + 4242);
+  const clubs = clubMap(pack);
+
+  for (const fixture of next.fixtures) {
+    if (fixture.result || fixture.date >= cutoff) continue;
+    const home = clubs.get(fixture.homeClubId);
+    const away = clubs.get(fixture.awayClubId);
+    if (!home || !away) continue;
+    commitFixtureStandingsOnly(next, fixture, simulateMatchQuick(home, away, rng));
+  }
+
+  next.currentDate = cutoff;
+  next.news = [
+    {
+      id: `news-debug-near-end-${next.season}-${cutoff}`,
+      date: cutoff,
+      category: "insight",
+      headline: `Тест: до конца чемпионата ${keep} тура`,
+      body: `Календарь перемотан к дате ${cutoff}. Сыграйте оставшиеся матчи и проверьте переход в новый сезон.`,
+      relatedClubIds: [next.clubId],
+    },
+    ...next.news,
+  ];
+
+  return next;
 }
 
 export { liveMatchToResult };

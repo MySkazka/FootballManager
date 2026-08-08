@@ -285,10 +285,19 @@ export interface Fixture {
   result?: MatchResult;
 }
 
+export type NewsCategory =
+  | "match"
+  | "transfer_rumour"
+  | "quote"
+  | "national_team"
+  | "insight"
+  | "transfer"
+  | "drama";
+
 export interface NewsItem {
   id: string;
   date: string;
-  category: "match" | "transfer_rumour" | "quote" | "national_team" | "insight" | "transfer";
+  category: NewsCategory;
   headline: string;
   body: string;
   relatedClubIds?: string[];
@@ -299,6 +308,34 @@ export interface NewsItem {
     clubId?: string;
     playerId?: string;
   };
+}
+
+/** Squad discontent / dressing-room conflict (user club). */
+export type SquadDramaKind =
+  | "dressing_room_fight"
+  | "playing_time"
+  | "coach_clash"
+  | "wage_envy"
+  | "clique_conflict"
+  | "wants_transfer";
+
+export type SquadDramaStatus = "active" | "resolved" | "cooled";
+
+export interface SquadDrama {
+  id: string;
+  kind: SquadDramaKind;
+  playerIds: string[];
+  clubId: string;
+  startedOn: string;
+  status: SquadDramaStatus;
+  /** Last date overall/form penalty was applied. */
+  lastPenaltyOn?: string;
+  /** Last drama news / reminder date. */
+  lastNewsOn?: string;
+  /** Consecutive user-match starts in XI (cool-down). */
+  startsStreak?: number;
+  resolvedOn?: string;
+  resolvedReason?: "sold" | "loaned" | "starting_xi" | "cooled";
 }
 
 export interface WorldPack {
@@ -367,6 +404,21 @@ export interface IncomingTransferOffer {
   status: "pending" | "accepted" | "rejected" | "expired";
 }
 
+/** User buy/loan bid awaiting seller response on the next tour / day advance. */
+export interface OutgoingTransferOffer {
+  id: string;
+  date: string;
+  windowId: string;
+  kind: "buy" | "loan";
+  playerId: string;
+  playerName: string;
+  /** Club that currently owns the player. */
+  sellingClubId: string;
+  fee: number;
+  swapPlayerIds?: string[];
+  status: "pending" | "accepted" | "rejected" | "expired";
+}
+
 export interface WindowTransferReport {
   windowId: string;
   label: string;
@@ -394,10 +446,14 @@ export interface CareerSave {
   transferWindows: TransferWindow[];
   /** Matches remaining to miss after a red card (or yellow accumulation). */
   suspensions: Record<string, number>;
+  /** Active / recent squad discontent events (dressing-room drama). */
+  squadDramas?: SquadDrama[];
   /** Log of deals in the current season (for window reports). */
   transferLog?: TransferDealRecord[];
   /** Pending / recent buy offers for the user's players. */
   incomingTransferOffers?: IncomingTransferOffer[];
+  /** Pending user buy/loan offers awaiting club reply next tour. */
+  outgoingTransferOffers?: OutgoingTransferOffer[];
   /** Shown once after a transfer window closes. */
   pendingWindowReport?: WindowTransferReport | null;
   /** Market value at the start of the current championship (per player). */

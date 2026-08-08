@@ -4,6 +4,9 @@ import {
   FORMATION_COORDS,
   FORMATION_ROLES,
   FORMATIONS,
+  ROLE_LABEL,
+  analyzeLineupStrength,
+  applyOptimalLineup,
   autoSelectLineup,
   effectiveOverall,
   mentalityLabel,
@@ -11,10 +14,13 @@ import {
   suggestFormations,
   type FormationId,
   type LineupContext,
+  type LineupStrengthHint,
   type Player,
   type TeamTactics,
 } from "@fm/engine";
 import { PersonPortrait } from "./PersonPortrait";
+import { FormationPitch, pitchRoleTags, pitchShortName } from "./FormationPitch";
+import {broadcast, registerThemeRebuild} from "./broadcastTheme";
 
 export function TacticsPanel({
   tactics,
@@ -39,6 +45,7 @@ export function TacticsPanel({
   lineupContext?: LineupContext;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [strengthHints, setStrengthHints] = useState<LineupStrengthHint[] | null>(null);
   const byId = new Map(squad.map((p) => [p.id, p]));
   const formation = tactics?.formation ?? "4-3-3";
   const lineup = tactics?.lineup ?? [];
@@ -50,6 +57,7 @@ export function TacticsPanel({
 
   const setFormation = (nextFormation: FormationId) => {
     setSelectedId(null);
+    setStrengthHints(null);
     onChange({
       ...(tactics ?? { attack: 55, defence: 55, aggression: 50, formation, lineup }),
       formation: nextFormation,
@@ -57,6 +65,18 @@ export function TacticsPanel({
         ? lineup.slice(0, 11)
         : autoSelectLineup(squad, clubId, nextFormation, lineupContext),
     });
+  };
+
+  const showStrengthHints = () => {
+    if (lockLineup) return;
+    setStrengthHints(analyzeLineupStrength(squad, clubId, tactics, lineupContext));
+  };
+
+  const applyStrengthHints = () => {
+    if (lockLineup) return;
+    const next = applyOptimalLineup(squad, clubId, tactics, lineupContext);
+    onChange(next);
+    setStrengthHints(analyzeLineupStrength(squad, clubId, next, lineupContext));
   };
 
   const swapPlayers = (aId: string, bId: string) => {
@@ -72,7 +92,6 @@ export function TacticsPanel({
     } else if (bi >= 0) {
       nextLineup[bi] = aId;
     } else {
-      // Two bench players — no lineup change
       setSelectedId(null);
       return;
     }
@@ -96,10 +115,42 @@ export function TacticsPanel({
     swapPlayers(selectedId, id);
   };
 
+  // Formation order for XI; overall desc for bench (never “missing portrait first”)
   const bench = squad
     .filter((p) => !lineup.includes(p.id))
     .filter((p) => (lineupContext?.suspensions?.[p.id] ?? 0) <= 0)
-    .sort((a, b) => b.overall - a.overall);
+    .sort((a, b) => b.overall - a.overall || a.lastName.localeCompare(b.lastName, "ru"));
+
+  const pitchSlots = lineup.flatMap((id, i) => {
+    const p = byId.get(id);
+    const c = coords[i] ?? { x: 50, y: 50 };
+    const role = slots[i] ?? "CM";
+    if (!p) return [];
+    const eff = effectiveOverall(p, role);
+    const outOfPos = eff < p.overall - 1;
+    return [
+      {
+        key: `${id}-${i}`,
+        x: c.x,
+        y: c.y,
+        rating: Math.round(eff),
+        name: pitchShortName(p),
+        roleTags: pitchRoleTags(role, p),
+        portrait: {
+          seed: p.id,
+          portraitId: p.portraitId,
+          nationalityId: p.nationalityId,
+          age: p.age,
+          jersey,
+          jerseySecondary,
+        },
+        selected: selectedId === id,
+        warn: outOfPos,
+        disabled: !!lockLineup,
+        onPress: lockLineup ? undefined : () => onTapPlayer(id),
+      },
+    ];
+  });
 
   const slider = (key: "attack" | "defence" | "aggression", label: string) => (
     <View style={styles.sliderBlock} key={key}>
@@ -128,7 +179,7 @@ export function TacticsPanel({
   return (
     <View>
       <Text style={styles.section}>Схема</Text>
-      {!lockLineup && suggestions.length ? (
+      {!lockLineup && !compact && suggestions.length ? (
         <View style={styles.suggestBox}>
           <Text style={styles.suggestTitle}>Рекомендуем по составу</Text>
           {suggestions.map((s, i) => (
@@ -163,62 +214,87 @@ export function TacticsPanel({
         ))}
       </View>
 
-      <View style={[styles.pitch, compact && styles.pitchCompact]}>
-        {lineup.map((id, i) => {
-          const p = byId.get(id);
-          const c = coords[i] ?? { x: 50, y: 50 };
-          const role = slots[i] ?? "CM";
-          if (!p) return null;
-          const eff = effectiveOverall(p, role);
-          const outOfPos = eff < p.overall;
-          const avatar = compact ? 24 : 28;
-          const selected = selectedId === id;
-          return (
-            <Pressable
-              key={`${id}-${i}`}
-              disabled={lockLineup}
-              onPress={() => onTapPlayer(id)}
-              style={[
-                styles.pitchPlayer,
-                compact && styles.pitchPlayerCompact,
-                selected && styles.pitchPlayerSelected,
-                {
-                  left: `${c.x}%`,
-                  top: `${c.y}%`,
-                },
-              ]}
-            >
-              <View style={styles.pitchAvatarWrap}>
-                <PersonPortrait
-                  seed={p.id}
-                  size={avatar}
-                  jersey={jersey}
-                  jerseySecondary={jerseySecondary}
-                  age={p.age}
-                  portraitId={p.portraitId}
-                  nationalityId={p.nationalityId}
-                />
-                <View style={[styles.pitchOvrBadge, outOfPos && styles.pitchOvrBadgeDown]}>
-                  <Text style={styles.pitchOvrBadgeText}>{eff}</Text>
-                </View>
-              </View>
-              <Text style={styles.pitchCaption} numberOfLines={2}>
-                <Text style={styles.pitchName}>{p.lastName}</Text>
-                {"\n"}
-                <Text style={styles.pitchPos}>{rolesLabel(p)}</Text>
-              </Text>
+      {!lockLineup && !compact ? (
+        <View style={styles.strengthBox}>
+          <Text style={styles.strengthTitle}>Сила основы</Text>
+          <Text style={styles.strengthLead}>
+            Подсказки по тем же правилам, что и матч: роль в схеме, любимая нога на фланге, OVR со
+            штрафом вне позиции.
+          </Text>
+          <View style={styles.strengthActions}>
+            <Pressable style={styles.strengthBtnSecondary} onPress={showStrengthHints}>
+              <Text style={styles.strengthBtnSecondaryText}>Показать подсказки</Text>
             </Pressable>
-          );
-        })}
-      </View>
+            <Pressable style={styles.strengthBtn} onPress={applyStrengthHints}>
+              <Text style={styles.strengthBtnText}>Применить автооснову</Text>
+            </Pressable>
+          </View>
+          {strengthHints?.map((h, i) => (
+            <Text key={`${i}-${h.message.slice(0, 24)}`} style={styles.strengthHint}>
+              · {h.message}
+            </Text>
+          ))}
+        </View>
+      ) : null}
 
-      {slider("attack", "Атака")}
-      {slider("defence", "Оборона")}
-      {slider("aggression", "Агрессия")}
-      {(tactics?.attack ?? 55) + (tactics?.defence ?? 55) >= 140 ? (
-        <Text style={styles.warn}>
-          Высокая атака и оборона одновременно растягивают команду — в матче оба показателя работают хуже, игроки быстрее устают.
-        </Text>
+      <FormationPitch
+        compact={compact}
+        slots={pitchSlots}
+        footer={
+          compact ? undefined : (
+          <View style={styles.xiList}>
+            <Text style={styles.xiListTitle}>
+              Основа · {formation}
+            </Text>
+            {lineup.map((id, i) => {
+              const p = byId.get(id);
+              const role = slots[i] ?? "CM";
+              if (!p) return null;
+              const selected = selectedId === id;
+              const eff = effectiveOverall(p, role);
+              return (
+                <Pressable
+                  key={`xi-${id}-${i}`}
+                  disabled={!!lockLineup}
+                  onPress={() => onTapPlayer(id)}
+                  style={[styles.xiRow, selected && styles.xiRowSelected]}
+                >
+                  <PersonPortrait
+                    seed={p.id}
+                    size={28}
+                    jersey={jersey}
+                    jerseySecondary={jerseySecondary}
+                    age={p.age}
+                    portraitId={p.portraitId}
+                    nationalityId={p.nationalityId}
+                  />
+                  <Text style={styles.xiRole}>{ROLE_LABEL[role] ?? role}</Text>
+                  <Text style={styles.xiName} numberOfLines={1}>
+                    {p.lastName}
+                  </Text>
+                  <Text style={styles.xiOvrMeta}>
+                    {p.overall}
+                    {eff !== p.overall ? `→${eff}` : ""}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          )
+        }
+      />
+
+      {!compact ? (
+        <>
+          {slider("attack", "Атака")}
+          {slider("defence", "Оборона")}
+          {slider("aggression", "Агрессия")}
+          {(tactics?.attack ?? 55) + (tactics?.defence ?? 55) >= 140 ? (
+            <Text style={styles.warn}>
+              Высокая атака и оборона одновременно растягивают команду — в матче оба показателя работают хуже, игроки быстрее устают.
+            </Text>
+          ) : null}
+        </>
       ) : null}
 
       <Text style={styles.section}>
@@ -262,113 +338,157 @@ export function TacticsPanel({
       </View>
       {!lockLineup ? (
         <Text style={styles.hint}>
-          Тап по игроку на поле или скамейке — выбор, второй тап — обмен. Сила учитывает роль и ногу.
+          На схеме: сила в роли над аватаркой, имя и позиция слота снизу. Тап — выбрать, затем обмен.
         </Text>
       ) : null}
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+function buildStyles() {
+  return StyleSheet.create({
   suggestBox: {
     marginBottom: 10,
     padding: 10,
     borderWidth: 1,
-    borderColor: "#24332C",
-    backgroundColor: "#0E1512",
+    borderColor: broadcast.ctaSecondaryBorder,
+    backgroundColor: broadcast.surfaceAlt,
+    borderRadius: broadcast.radiusMd,
     gap: 6,
   },
-  suggestTitle: { color: "#C6A75E", fontSize: 12, fontWeight: "700", marginBottom: 2 },
-  suggestRow: { paddingVertical: 6, paddingHorizontal: 4, gap: 2 },
-  suggestRowOn: { backgroundColor: "#16211C" },
-  suggestFormation: { color: "#E8F0EA", fontSize: 13, fontWeight: "700" },
-  suggestReason: { color: "#8FA396", fontSize: 11, lineHeight: 15 },
+  suggestTitle: { color: broadcast.accent, fontSize: 12, fontWeight: "700", marginBottom: 2 },
+  suggestRow: { paddingVertical: 6, paddingHorizontal: 4, gap: 2, borderRadius: 8 },
+  suggestRowOn: { backgroundColor: broadcast.accentSoft },
+  suggestFormation: { color: broadcast.white, fontSize: 13, fontWeight: "700" },
+  suggestReason: { color: broadcast.mist, fontSize: 11, lineHeight: 15 },
+  strengthBox: {
+    marginTop: 12,
+    marginBottom: 4,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: broadcast.gold,
+    backgroundColor: broadcast.surfaceElevated,
+    borderRadius: broadcast.radiusMd,
+    gap: 8,
+  },
+  strengthTitle: { color: broadcast.gold, fontWeight: "700", fontSize: 14 },
+  strengthLead: { color: broadcast.mist, fontSize: 12, lineHeight: 17 },
+  strengthActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  strengthBtn: {
+    backgroundColor: broadcast.accent,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: broadcast.radiusPill,
+  },
+  strengthBtnText: { color: "#0A1210", fontSize: 12, fontWeight: "800" },
+  strengthBtnSecondary: {
+    borderWidth: 1,
+    borderColor: broadcast.ctaSecondaryBorder,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: broadcast.radiusPill,
+    backgroundColor: broadcast.surfaceAlt,
+  },
+  strengthBtnSecondaryText: { color: broadcast.white, fontSize: 12, fontWeight: "700" },
+  strengthHint: { color: broadcast.mist, fontSize: 12, lineHeight: 17 },
   section: {
     marginTop: 14,
     marginBottom: 8,
-    color: "#C6A75E",
+    color: broadcast.mist,
     fontSize: 12,
-    letterSpacing: 1,
+    letterSpacing: 1.2,
     textTransform: "uppercase",
+    fontWeight: "700",
   },
   sliderBlock: { marginBottom: 8 },
-  sliderLabel: { color: "#E8F0EA", fontSize: 13, marginBottom: 6 },
+  sliderLabel: { color: broadcast.white, fontSize: 13, marginBottom: 6 },
   sliderRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   chip: {
     borderWidth: 1,
-    borderColor: "#24332C",
+    borderColor: broadcast.ctaSecondaryBorder,
     paddingHorizontal: 10,
     paddingVertical: 6,
+    backgroundColor: broadcast.surfaceAlt,
+    borderRadius: broadcast.radiusPill,
   },
-  chipOn: { borderColor: "#C6A75E", backgroundColor: "#16211C" },
-  chipText: { color: "#8FA396", fontSize: 12 },
-  chipTextOn: { color: "#E8F0EA" },
-  pitch: {
-    height: 360,
-    backgroundColor: "#1A3D2E",
-    borderWidth: 1,
-    borderColor: "#2F5D45",
-    marginVertical: 10,
+  chipOn: {
+    borderColor: broadcast.accent,
+    backgroundColor: broadcast.accentSoft,
+    shadowColor: broadcast.accent,
+    shadowOpacity: 0.45,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  chipText: { color: broadcast.mist, fontSize: 12, fontWeight: "700" },
+  chipTextOn: { color: broadcast.white },
+  xiList: {
+    marginTop: 2,
+    marginBottom: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: broadcast.cardBorder,
+    backgroundColor: broadcast.surfaceAlt,
+    borderRadius: broadcast.radiusMd,
     overflow: "hidden",
   },
-  pitchCompact: { height: 300 },
-  pitchPlayer: {
-    position: "absolute",
-    width: 72,
-    marginLeft: -36,
-    marginTop: -2,
+  xiListTitle: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    color: broadcast.mist,
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: broadcast.cardBorder,
+  },
+  xiRow: {
+    flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 2,
-    borderRadius: 4,
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: broadcast.cardBorder,
   },
-  pitchPlayerCompact: {
-    width: 64,
-    marginLeft: -32,
+  xiRowSelected: {
+    backgroundColor: broadcast.accentSoft,
   },
-  pitchPlayerSelected: {
-    backgroundColor: "rgba(198, 167, 94, 0.28)",
-    borderWidth: 1,
-    borderColor: "#C6A75E",
+  xiRole: {
+    width: 40,
+    color: broadcast.accent,
+    fontSize: 11,
+    fontWeight: "700",
   },
-  pitchAvatarWrap: {
-    position: "relative",
+  xiName: {
+    flex: 1,
+    color: broadcast.mist,
+    fontSize: 13,
+    fontWeight: "600",
   },
-  pitchOvrBadge: {
-    position: "absolute",
-    right: -6,
-    bottom: -2,
-    minWidth: 18,
-    paddingHorizontal: 3,
-    paddingVertical: 1,
-    borderRadius: 4,
-    backgroundColor: "#0E1512",
-    borderWidth: 1,
-    borderColor: "#C6A75E",
-    alignItems: "center",
+  xiOvrMeta: {
+    color: broadcast.white,
+    fontSize: 11,
+    fontWeight: "700",
+    minWidth: 44,
+    textAlign: "right",
   },
-  pitchOvrBadgeDown: { borderColor: "#E67E22" },
-  pitchOvrBadgeText: { color: "#E8F0EA", fontSize: 8, fontWeight: "800" },
-  pitchCaption: {
-    marginTop: 3,
-    maxWidth: 70,
-    textAlign: "center",
-    lineHeight: 11,
-  },
-  pitchName: {
-    color: "#E8F0EA",
-    fontSize: 8,
-  },
-  pitchPos: { color: "#C6A75E", fontSize: 7 },
   warn: { color: "#E67E22", fontSize: 11, marginBottom: 8, lineHeight: 15 },
   benchRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  benchItem: { width: 72, alignItems: "center", paddingVertical: 4, borderRadius: 4 },
+  benchItem: { width: 72, alignItems: "center", paddingVertical: 4, borderRadius: 8 },
   benchItemSelected: {
-    backgroundColor: "rgba(198, 167, 94, 0.28)",
+    backgroundColor: broadcast.accentSoft,
     borderWidth: 1,
-    borderColor: "#C6A75E",
+    borderColor: broadcast.accent,
   },
-  benchPos: { color: "#C6A75E", fontSize: 8, marginTop: 2, textAlign: "center" },
-  benchText: { color: "#8FA396", fontSize: 9 },
-  benchOvr: { color: "#E8F0EA", fontSize: 11, fontWeight: "700" },
-  hint: { color: "#5F7A6C", fontSize: 11, marginTop: 8 },
+  benchPos: { color: broadcast.accent, fontSize: 8, marginTop: 2, textAlign: "center" },
+  benchText: { color: broadcast.mistDim, fontSize: 9 },
+  benchOvr: { color: broadcast.white, fontSize: 11, fontWeight: "700" },
+  hint: { color: broadcast.mistDim, fontSize: 11, marginTop: 8 },
 });
+}
+
+let styles = buildStyles();
+registerThemeRebuild(() => {
+  styles = buildStyles();
+});
+

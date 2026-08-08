@@ -2,6 +2,7 @@ import type {
   CareerSave,
   Club,
   IncomingTransferOffer,
+  OutgoingTransferOffer,
   Player,
   TransferDealRecord,
   TransferResult,
@@ -15,11 +16,13 @@ import {
   playerSquadRole,
   sellerAskDiscountForBuyerStrength,
 } from "./agency";
-import { primaryPosition } from "./labels";
+import { formatMarketValue, primaryPosition } from "./labels";
 import { computePlayerWage, recomputeMarketValue } from "./players";
 import { Rng } from "./rng";
 import { analyzeSquadNeeds, topSquadNeedPositions } from "./squadNeeds";
 import { autoSelectLineup, defaultTactics } from "./tactics";
+import { clearSquadDramasForPlayers } from "./squadDrama";
+import { seasonEuroGuestIds } from "./continental";
 
 function roundFee(n: number): number {
   return Math.round(Math.max(0, n) * 10) / 10;
@@ -189,30 +192,117 @@ export function clearWindowReport(save: CareerSave): CareerSave {
 }
 
 /** Players from other clubs the user can bid on (all leagues by default). */
+export type TransferMarketScope = "all" | "league" | "other" | "euro";
+
+function sortTransferPool(a: Player, b: Player): number {
+  return (b.marketValue ?? 0) - (a.marketValue ?? 0) || b.overall - a.overall;
+}
+
+function takeTopPlayers(pool: Player[], n: number): Player[] {
+  if (n <= 0 || pool.length === 0) return [];
+  return [...pool].sort(sortTransferPool).slice(0, n);
+}
+
+/**
+ * Classify a club for the transfer market:
+ * - league: user's domestic championship
+ * - other: other playable domestic leagues in the pack
+ * - euro: guest euro-cup clubs (UCL/UEL/UECL pool)
+ */
+export function transferClubScope(
+  pack: WorldPack,
+  save: CareerSave,
+  clubId: string
+): TransferMarketScope | null {
+  const homeLeague = pack.leagues.find((l) => l.clubIds.includes(save.clubId));
+  if (homeLeague?.clubIds.includes(clubId)) return "league";
+  const club = pack.clubs.find((c) => c.id === clubId);
+  if (!club) return null;
+  if (club.guest) return "euro";
+  const inOtherLeague = pack.leagues.some(
+    (l) => l.id !== homeLeague?.id && l.clubIds.includes(clubId)
+  );
+  if (inOtherLeague) return "other";
+  // Guests that somehow aren't flagged, or euro-only entrants
+  const euroGuests = new Set(seasonEuroGuestIds(pack, save.season, save.uefa));
+  if (euroGuests.has(clubId)) return "euro";
+  return null;
+}
+
 export function listTransferTargets(
   pack: WorldPack,
   save: CareerSave,
-  opts?: { leagueOnly?: boolean; limit?: number }
+  opts?: { leagueOnly?: boolean; scope?: TransferMarketScope; limit?: number }
 ): Player[] {
-  const league = pack.leagues.find((l) => l.clubIds.includes(save.clubId));
-  const leagueSet = new Set(league?.clubIds ?? []);
+  const homeLeague = pack.leagues.find((l) => l.clubIds.includes(save.clubId));
+  const leagueSet = new Set(homeLeague?.clubIds ?? []);
   const leagueOnly = opts?.leagueOnly ?? false;
+  const scope: TransferMarketScope = opts?.scope ?? (leagueOnly ? "league" : "all");
   const limit = opts?.limit ?? 200;
 
-  const pool = save.players.filter((p) => {
-    if (!p.clubId || p.clubId === save.clubId) return false;
-    if (leagueOnly && !leagueSet.has(p.clubId)) return false;
-    return true;
-  });
+  const clubsById = new Map(pack.clubs.map((c) => [c.id, c]));
+  const otherLeagueIds = new Set(
+    pack.leagues
+      .filter((l) => l.id !== homeLeague?.id)
+      .flatMap((l) => l.clubIds)
+  );
+  let euroIds = new Set(seasonEuroGuestIds(pack, save.season, save.uefa));
+  if (euroIds.size === 0) {
+    for (const c of pack.clubs) {
+      if (c.guest) euroIds.add(c.id);
+    }
+  } else {
+    // Always include flagged guests even if not drawn this season — market depth
+    for (const c of pack.clubs) {
+      if (c.guest) euroIds.add(c.id);
+    }
+  }
 
-  // Prefer same-league deals slightly, then market value / overall
-  pool.sort((a, b) => {
-    const aHome = leagueSet.has(a.clubId!) ? 1 : 0;
-    const bHome = leagueSet.has(b.clubId!) ? 1 : 0;
-    if (bHome !== aHome) return bHome - aHome;
-    return (b.marketValue ?? 0) - (a.marketValue ?? 0) || b.overall - a.overall;
-  });
-  return pool.slice(0, limit);
+  const buckets: Record<"league" | "other" | "euro", Player[]> = {
+    league: [],
+    other: [],
+    euro: [],
+  };
+
+  for (const p of save.players) {
+    if (!p.clubId || p.clubId === save.clubId) continue;
+    if (leagueSet.has(p.clubId)) {
+      buckets.league.push(p);
+      continue;
+    }
+    if (euroIds.has(p.clubId) || clubsById.get(p.clubId)?.guest) {
+      buckets.euro.push(p);
+      continue;
+    }
+    if (otherLeagueIds.has(p.clubId)) {
+      buckets.other.push(p);
+    }
+  }
+
+  if (scope === "league") return takeTopPlayers(buckets.league, limit);
+  if (scope === "other") return takeTopPlayers(buckets.other, limit);
+  if (scope === "euro") return takeTopPlayers(buckets.euro, limit);
+
+  // «Все»: balanced mix so same-league depth doesn't drown out other leagues / euro guests.
+  const nLeague = Math.ceil(limit * 0.4);
+  const nOther = Math.ceil(limit * 0.35);
+  const nEuro = Math.max(8, limit - nLeague - nOther);
+  const picked = [
+    ...takeTopPlayers(buckets.league, nLeague),
+    ...takeTopPlayers(buckets.other, nOther),
+    ...takeTopPlayers(buckets.euro, nEuro),
+  ];
+  const seen = new Set(picked.map((p) => p.id));
+  if (picked.length < limit) {
+    const rest = [...buckets.league, ...buckets.other, ...buckets.euro]
+      .filter((p) => !seen.has(p.id))
+      .sort(sortTransferPool);
+    for (const p of rest) {
+      picked.push(p);
+      if (picked.length >= limit) break;
+    }
+  }
+  return picked.slice(0, limit).sort(sortTransferPool);
 }
 
 export interface BuyNegotiation {
@@ -401,13 +491,13 @@ export function evaluateBuyOffer(
   if (fee > neg.hardCeil + 0.05 && !swaps.length) {
     return {
       status: "cap",
-      message: `Слишком завышенная сумма. В реалиях рынка потолок около ${neg.hardCeil.toFixed(1)} млн.`,
+      message: `Слишком завышенная сумма. В реалиях рынка потолок около ${formatMarketValue(neg.hardCeil)}.`,
     };
   }
   if (fee > neg.hardCeil + swapCredit + 0.05) {
     return {
       status: "cap",
-      message: `Даже с обменом клуб не возьмёт больше ~${(neg.hardCeil).toFixed(1)} млн кэшем.`,
+      message: `Даже с обменом клуб не возьмёт больше ~${formatMarketValue(neg.hardCeil)} кэшем.`,
     };
   }
 
@@ -430,7 +520,7 @@ export function evaluateBuyOffer(
           : "Почти договорились — не хватает совсем чуть-чуть.";
     return {
       status: "reject",
-      message: `«${neg.sellerName}» отклонили пакет на ~${totalValue.toFixed(1)} млн. ${hint}`,
+      message: `«${neg.sellerName}» отклонили пакет на ~${formatMarketValue(totalValue)}. ${hint}`,
     };
   }
 
@@ -468,7 +558,7 @@ export function evaluateBuyOffer(
     : "";
   return {
     status: "accept",
-    message: `«${neg.sellerName}» согласны: ${fee.toFixed(1)} млн${swapNote}.`,
+    message: `«${neg.sellerName}» согласны: ${formatMarketValue(fee)}${swapNote}.`,
   };
 }
 
@@ -593,14 +683,14 @@ export function buyPlayer(
   const swapPart = swapNames.length ? `, обмен: ${swapNames.join(", ")}` : "";
   const overMv =
     fee > neg.marketValue + 0.05
-      ? ` (оценка рынка ${neg.marketValue.toFixed(1)} млн)`
+      ? ` (оценка рынка ${formatMarketValue(neg.marketValue)})`
       : "";
   next.news.unshift({
     id: `news-transfer-buy-${player.id}-${next.currentDate}`,
     date: next.currentDate,
     category: "transfer",
     headline: `${player.firstName} ${player.lastName} → «${toClub?.shortName ?? "клуб"}»`,
-    body: `Клуб приобрёл игрока за ${fee.toFixed(1)} млн у «${fromClub?.name ?? fromClubId}»${swapPart}${overMv}. Бюджет: ${budgetBefore.toFixed(1)} → ${budgetAfter.toFixed(1)} млн.`,
+    body: `Клуб приобрёл игрока за ${formatMarketValue(fee)} у «${fromClub?.name ?? fromClubId}»${swapPart}${overMv}. Бюджет: ${formatMarketValue(budgetBefore)} → ${formatMarketValue(budgetAfter)}.`,
     relatedClubIds: [next.clubId, fromClubId],
     relatedPlayerIds: [player.id, ...uniqueSwapIds],
   });
@@ -708,12 +798,14 @@ export function sellPlayer(
     next.userTactics = defaultTactics(next.players, next.clubId, next.userTactics.formation);
   }
 
+  clearSquadDramasForPlayers(next, [playerId], "sold");
+
   next.news.unshift({
     id: `news-transfer-sell-${player.id}-${next.currentDate}`,
     date: next.currentDate,
     category: "transfer",
     headline: `${player.firstName} ${player.lastName} ушёл в «${buyer.shortName}»`,
-    body: `«${fromClub?.name ?? next.clubId}» продали игрока за ${fee.toFixed(1)} млн. Бюджет: ${budgetBefore.toFixed(1)} → ${budgetAfter.toFixed(1)} млн.`,
+    body: `«${fromClub?.name ?? next.clubId}» продали игрока за ${formatMarketValue(fee)}. Бюджет: ${formatMarketValue(budgetBefore)} → ${formatMarketValue(budgetAfter)}.`,
     relatedClubIds: [next.clubId, buyer.id],
     relatedPlayerIds: [player.id],
   });
@@ -739,7 +831,175 @@ export function sellPlayer(
   return { ok: true, save: next, fee, budgetBefore, budgetAfter };
 }
 
+/** Status of an AI club as a destination for a user sell/loan. */
+export type OutboundOfferStatus =
+  | "ready"
+  | "player_refuse"
+  | "no_budget"
+  | "no_interest"
+  | "wage"
+  | "squad_full";
+
+export type OutboundClubOffer = {
+  clubId: string;
+  leagueId: string;
+  fee: number;
+  status: OutboundOfferStatus;
+  reason?: string;
+  /** Loan only: would the player start for the host. */
+  wouldStart?: boolean;
+};
+
+function leagueIdForClub(pack: WorldPack, clubId: string): string {
+  return pack.leagues.find((l) => l.clubIds.includes(clubId))?.id ?? "other";
+}
+
+/** Deterministic fee an AI club would table for this player. */
+function aiOutboundBuyFee(
+  pack: WorldPack,
+  save: CareerSave,
+  player: Player,
+  buyerId: string,
+  needsPosition: boolean
+): number {
+  const mv = Math.max(0.5, player.marketValue ?? 0.5);
+  const budget = clubBudget(save, buyerId);
+  const prestige = sellerAskDiscountForBuyerStrength(pack, save, buyerId, save.clubId);
+  const unit = stableUnit(`${player.id}:${buyerId}:outfee`);
+  const stretch =
+    0.9 + unit * 0.22 + (needsPosition ? 0.06 : 0) + (budget > mv * 2 ? 0.05 : 0) - prestige * 0.85;
+  let fee = roundFee(Math.min(budget * 0.9, mv * Math.max(0.78, stretch)));
+  if (fee < mv * 0.72) fee = roundFee(Math.min(budget * 0.82, mv * 0.82));
+  return Math.max(0.5, fee);
+}
+
+/**
+ * Clubs that could buy a user player — grouped later by UI by league.
+ * Ready rows have a real offer fee; others explain why the deal is blocked.
+ */
+export function listSellClubOffers(
+  pack: WorldPack,
+  save: CareerSave,
+  playerId: string
+): OutboundClubOffer[] {
+  const player = save.players.find((p) => p.id === playerId);
+  if (!player || player.clubId !== save.clubId || player.loan) return [];
+
+  const userSquad = save.players.filter((p) => p.clubId === save.clubId && !p.loan);
+  if (userSquad.length <= 16) {
+    return pack.clubs
+      .filter((c) => c.id !== save.clubId)
+      .map((c) => ({
+        clubId: c.id,
+        leagueId: leagueIdForClub(pack, c.id),
+        fee: 0,
+        status: "squad_full" as const,
+        reason: "Слишком мало игроков в составе.",
+      }));
+  }
+
+  const pos = primaryPosition(player);
+  const mv = player.marketValue ?? 0;
+  const xiCache = { xiByClub: new Map<string, Set<string>>() };
+  const offers: OutboundClubOffer[] = [];
+
+  for (const club of pack.clubs) {
+    if (club.id === save.clubId) continue;
+    const leagueId = leagueIdForClub(pack, club.id);
+    const budget = clubBudget(save, club.id);
+    const needs = analyzeSquadNeeds(save.players, club.id);
+    const want = new Set(topSquadNeedPositions(needs, 3));
+    const needsPos = want.has(pos);
+
+    if (budget < Math.max(0.8, mv * 0.35)) {
+      offers.push({
+        clubId: club.id,
+        leagueId,
+        fee: 0,
+        status: "no_budget",
+        reason: "Не хватает бюджета",
+      });
+      continue;
+    }
+
+    const wageOk = evaluateWageAffordability(pack, save, club.id, player.wage ?? 0);
+    if (!wageOk.ok) {
+      offers.push({
+        clubId: club.id,
+        leagueId,
+        fee: 0,
+        status: "wage",
+        reason: wageOk.message ?? "Не потянут зарплату",
+      });
+      continue;
+    }
+
+    const will = evaluatePlayerTransferWillingness(pack, save, player.id, club.id, xiCache);
+    if (!will.ok) {
+      offers.push({
+        clubId: club.id,
+        leagueId,
+        fee: 0,
+        status: "player_refuse",
+        reason: will.message,
+      });
+      continue;
+    }
+
+    // Soft interest: need position, or gap vs squad level, or rich mid-table shopper
+    const hostSquad = save.players.filter((p) => p.clubId === club.id && !p.loan);
+    const samePos = hostSquad.filter((p) => primaryPosition(p) === pos);
+    const bestSame = samePos.sort((a, b) => b.overall - a.overall)[0];
+    const interested =
+      needsPos ||
+      !bestSame ||
+      player.overall >= bestSame.overall - 2 ||
+      (club.reputation + 8 >= (player.overall ?? 70) && budget >= mv * 0.85);
+
+    if (!interested) {
+      offers.push({
+        clubId: club.id,
+        leagueId,
+        fee: 0,
+        status: "no_interest",
+        reason: "Клуб не заинтересован",
+      });
+      continue;
+    }
+
+    const fee = aiOutboundBuyFee(pack, save, player, club.id, needsPos);
+    if (fee > budget) {
+      offers.push({
+        clubId: club.id,
+        leagueId,
+        fee: 0,
+        status: "no_budget",
+        reason: "Не хватает бюджета",
+      });
+      continue;
+    }
+
+    offers.push({
+      clubId: club.id,
+      leagueId,
+      fee,
+      status: "ready",
+      reason: will.message,
+    });
+  }
+
+  return offers.sort((a, b) => {
+    if (a.status === "ready" && b.status !== "ready") return -1;
+    if (b.status === "ready" && a.status !== "ready") return 1;
+    return b.fee - a.fee;
+  });
+}
+
 function pickAiBuyer(pack: WorldPack, save: CareerSave, player: Player): Club | undefined {
+  const ready = listSellClubOffers(pack, save, player.id).filter((o) => o.status === "ready");
+  if (ready.length) {
+    return pack.clubs.find((c) => c.id === ready[0]!.clubId);
+  }
   const league = pack.leagues.find((l) => l.clubIds.includes(save.clubId));
   const candidates = pack.clubs.filter((c) => {
     if (c.id === save.clubId) return false;
@@ -842,7 +1102,7 @@ export function simulateAiTransfers(pack: WorldPack, save: CareerSave, rng: Rng)
           date: save.currentDate,
           category: "transfer",
           headline: `${pick.firstName} ${pick.lastName}: «${fromClub?.shortName}» → «${toClub?.shortName}»`,
-          body: `Клубы договорились о переходе за ${fee.toFixed(1)} млн в рамках трансферного окна.`,
+          body: `Клубы договорились о переходе за ${formatMarketValue(fee)} в рамках трансферного окна.`,
           relatedClubIds: [sellerId, buyerId],
           relatedPlayerIds: [pick.id],
         });
@@ -983,6 +1243,16 @@ export function generateIncomingTransferOffers(
     };
     pendingKeys.add(`${pick.id}:${buyerId}`);
     save.incomingTransferOffers = [offer, ...ensureIncomingOffers(save)].slice(0, 40);
+    const buyerClub = pack.clubs.find((c) => c.id === buyerId);
+    save.news.unshift({
+      id: `news-inoffer-${offer.id}`,
+      date: save.currentDate,
+      category: "transfer",
+      headline: `«${buyerClub?.shortName ?? buyerId}» хочет купить ${pick.lastName}`,
+      body: `Входящее предложение: ${pick.firstName} ${pick.lastName} за ${formatMarketValue(fee)}. Откройте Трансферы, чтобы принять или отклонить.`,
+      relatedClubIds: [save.clubId, buyerId],
+      relatedPlayerIds: [pick.id],
+    });
     created++;
   }
 }
@@ -1047,6 +1317,334 @@ export function rejectIncomingOffers(
     return { ...o, status: "rejected" as const };
   });
   return next;
+}
+
+function ensureOutgoingOffers(save: CareerSave): OutgoingTransferOffer[] {
+  if (!save.outgoingTransferOffers) save.outgoingTransferOffers = [];
+  return save.outgoingTransferOffers;
+}
+
+export function listPendingOutgoingOffers(save: CareerSave): OutgoingTransferOffer[] {
+  return (save.outgoingTransferOffers ?? []).filter((o) => o.status === "pending");
+}
+
+export function expireStaleOutgoingOffers(save: CareerSave): void {
+  const offers = ensureOutgoingOffers(save);
+  const open = isTransferWindowOpen(save);
+  const window = getActiveTransferWindow(save);
+  for (const o of offers) {
+    if (o.status !== "pending") continue;
+    const player = save.players.find((p) => p.id === o.playerId);
+    if (!open || !player || player.clubId === save.clubId) {
+      o.status = "expired";
+      continue;
+    }
+    if (o.kind === "buy" && player.clubId !== o.sellingClubId) {
+      o.status = "expired";
+      continue;
+    }
+    if (window && o.windowId !== window.id) o.status = "expired";
+  }
+  save.outgoingTransferOffers = offers
+    .filter((o) => o.status === "pending" || o.date >= save.currentDate.slice(0, 7))
+    .slice(0, 40);
+}
+
+export type SubmitOutgoingResult =
+  | { ok: true; save: CareerSave; offer: OutgoingTransferOffer }
+  | { ok: false; save: CareerSave; error: string };
+
+/** Queue a buy offer — seller reply comes on the next calendar day / tour. */
+export function submitOutgoingBuyOffer(
+  pack: WorldPack,
+  save: CareerSave,
+  playerId: string,
+  offeredFee: number,
+  swapPlayerIds: string[] = []
+): SubmitOutgoingResult {
+  if (!isTransferWindowOpen(save)) {
+    return { ok: false, save, error: "Трансферное окно закрыто." };
+  }
+  const window = getActiveTransferWindow(save);
+  if (!window) {
+    return { ok: false, save, error: "Трансферное окно закрыто." };
+  }
+  const neg = getBuyNegotiation(pack, save, playerId);
+  if (!neg) {
+    return { ok: false, save, error: "Игрок недоступен." };
+  }
+  const player = save.players.find((p) => p.id === playerId);
+  if (!player?.clubId || player.clubId === save.clubId) {
+    return { ok: false, save, error: "Игрок недоступен." };
+  }
+  const uniqueSwapIds = [...new Set(swapPlayerIds)].slice(0, MAX_SWAP_PLAYERS);
+  for (const id of uniqueSwapIds) {
+    const sp = save.players.find((p) => p.id === id);
+    if (!sp || sp.clubId !== save.clubId || sp.loan) {
+      return { ok: false, save, error: "В обмен можно отдавать только своих игроков не в аренде." };
+    }
+  }
+  const fee = roundFee(offeredFee);
+  if (clubBudget(save, save.clubId) < fee) {
+    return { ok: false, save, error: "Недостаточно бюджета." };
+  }
+  const pending = listPendingOutgoingOffers(save);
+  if (pending.some((o) => o.playerId === playerId && o.kind === "buy")) {
+    return {
+      ok: false,
+      save,
+      error: "По этому игроку уже есть ожидающее предложение. Дождитесь ответа к следующему туру.",
+    };
+  }
+
+  const next = structuredClone(save) as CareerSave;
+  const seller = pack.clubs.find((c) => c.id === player.clubId);
+  const offer: OutgoingTransferOffer = {
+    id: `outoffer-buy-${playerId}-${next.currentDate}-${ensureOutgoingOffers(next).length}`,
+    date: next.currentDate,
+    windowId: window.id,
+    kind: "buy",
+    playerId,
+    playerName: `${player.firstName} ${player.lastName}`,
+    sellingClubId: player.clubId,
+    fee,
+    swapPlayerIds: uniqueSwapIds,
+    status: "pending",
+  };
+  next.outgoingTransferOffers = [offer, ...ensureOutgoingOffers(next)].slice(0, 40);
+  next.news.unshift({
+    id: `news-outoffer-sent-${offer.id}`,
+    date: next.currentDate,
+    category: "transfer",
+    headline: `Предложение по ${player.lastName} отправлено`,
+    body: `Вы предложили «${seller?.shortName ?? player.clubId}» ${formatMarketValue(fee)} за ${player.firstName} ${player.lastName}. Ответ клуба придёт к следующему туру (после продвижения календаря).`,
+    relatedClubIds: [next.clubId, player.clubId],
+    relatedPlayerIds: [playerId],
+  });
+  return { ok: true, save: next, offer };
+}
+
+/** Queue a loan request — parent club replies next tour. */
+export function submitOutgoingLoanOffer(
+  pack: WorldPack,
+  save: CareerSave,
+  playerId: string
+): SubmitOutgoingResult {
+  if (!isTransferWindowOpen(save)) {
+    return { ok: false, save, error: "Трансферное окно закрыто." };
+  }
+  const window = getActiveTransferWindow(save);
+  if (!window) {
+    return { ok: false, save, error: "Трансферное окно закрыто." };
+  }
+  const player = save.players.find((p) => p.id === playerId);
+  if (!player?.clubId || player.clubId === save.clubId) {
+    return { ok: false, save, error: "Игрок недоступен." };
+  }
+  if (player.loan) {
+    return { ok: false, save, error: "Игрок уже находится в аренде." };
+  }
+  const fee = loanFeeForPlayer(player);
+  if (clubBudget(save, save.clubId) < fee) {
+    return { ok: false, save, error: "Недостаточно бюджета на аренду." };
+  }
+  if (listPendingOutgoingOffers(save).some((o) => o.playerId === playerId && o.kind === "loan")) {
+    return {
+      ok: false,
+      save,
+      error: "Заявка на аренду уже отправлена. Ждите ответа к следующему туру.",
+    };
+  }
+
+  const next = structuredClone(save) as CareerSave;
+  const parent = pack.clubs.find((c) => c.id === player.clubId);
+  const offer: OutgoingTransferOffer = {
+    id: `outoffer-loan-${playerId}-${next.currentDate}-${ensureOutgoingOffers(next).length}`,
+    date: next.currentDate,
+    windowId: window.id,
+    kind: "loan",
+    playerId,
+    playerName: `${player.firstName} ${player.lastName}`,
+    sellingClubId: player.clubId,
+    fee,
+    status: "pending",
+  };
+  next.outgoingTransferOffers = [offer, ...ensureOutgoingOffers(next)].slice(0, 40);
+  next.news.unshift({
+    id: `news-outloan-sent-${offer.id}`,
+    date: next.currentDate,
+    category: "transfer",
+    headline: `Заявка на аренду ${player.lastName} отправлена`,
+    body: `Запрос аренды у «${parent?.shortName ?? player.clubId}» за ${formatMarketValue(fee)}. Ответ — к следующему туру.`,
+    relatedClubIds: [next.clubId, player.clubId],
+    relatedPlayerIds: [playerId],
+  });
+  return { ok: true, save: next, offer };
+}
+
+/**
+ * Resolve pending outgoing offers submitted on a previous day.
+ * Call when the calendar advances (bumpDate / next tour).
+ */
+export function resolveOutgoingTransferOffers(pack: WorldPack, save: CareerSave): void {
+  expireStaleOutgoingOffers(save);
+  const pendingIds = ensureOutgoingOffers(save)
+    .filter((o) => o.status === "pending" && o.date < save.currentDate)
+    .map((o) => o.id);
+  if (!pendingIds.length) return;
+
+  for (const offerId of pendingIds) {
+    const offer = ensureOutgoingOffers(save).find((o) => o.id === offerId);
+    if (!offer || offer.status !== "pending") continue;
+
+    if (!isTransferWindowOpen(save)) {
+      offer.status = "expired";
+      save.news.unshift({
+        id: `news-outoffer-expired-${offer.id}`,
+        date: save.currentDate,
+        category: "transfer",
+        headline: `Предложение по ${offer.playerName} истекло`,
+        body: "Трансферное окно закрылось до ответа клуба.",
+        relatedClubIds: [save.clubId, offer.sellingClubId],
+        relatedPlayerIds: [offer.playerId],
+      });
+      continue;
+    }
+
+    const seller = pack.clubs.find((c) => c.id === offer.sellingClubId);
+    const sellerName = seller?.shortName ?? offer.sellingClubId;
+    const surname = offer.playerName.split(" ").pop() ?? offer.playerName;
+
+    if (offer.kind === "loan") {
+      const verdict = evaluateLoanWillingness(pack, save, offer.playerId);
+      if (!verdict.ok) {
+        offer.status = "rejected";
+        save.news.unshift({
+          id: `news-outloan-rej-${offer.id}`,
+          date: save.currentDate,
+          category: "transfer",
+          headline: `«${sellerName}» отклонили аренду ${surname}`,
+          body: verdict.message,
+          relatedClubIds: [save.clubId, offer.sellingClubId],
+          relatedPlayerIds: [offer.playerId],
+        });
+        continue;
+      }
+      const outgoingSnap = save.outgoingTransferOffers;
+      const result = loanPlayer(pack, save, offer.playerId);
+      if (!result.ok) {
+        offer.status = "rejected";
+        save.news.unshift({
+          id: `news-outloan-fail-${offer.id}`,
+          date: save.currentDate,
+          category: "transfer",
+          headline: `Аренда ${surname} не состоялась`,
+          body: result.error ?? "Клуб отказал в аренде.",
+          relatedClubIds: [save.clubId, offer.sellingClubId],
+          relatedPlayerIds: [offer.playerId],
+        });
+        continue;
+      }
+      save.players = result.save.players;
+      save.clubFinances = result.save.clubFinances;
+      save.transferLog = result.save.transferLog;
+      save.seasonStartMarketValues = result.save.seasonStartMarketValues;
+      save.userTactics = result.save.userTactics;
+      save.news = result.save.news;
+      save.outgoingTransferOffers = outgoingSnap;
+      const resolved = ensureOutgoingOffers(save).find((o) => o.id === offer.id);
+      if (resolved) resolved.status = "accepted";
+      save.news.unshift({
+        id: `news-outloan-ok-${offer.id}`,
+        date: save.currentDate,
+        category: "transfer",
+        headline: `«${sellerName}» согласились отдать в аренду ${surname}`,
+        body: `Аренда оформлена за ${formatMarketValue(result.fee ?? offer.fee)}.`,
+        relatedClubIds: [save.clubId, offer.sellingClubId],
+        relatedPlayerIds: [offer.playerId],
+      });
+      continue;
+    }
+
+    const neg = getBuyNegotiation(pack, save, offer.playerId);
+    if (!neg) {
+      offer.status = "expired";
+      save.news.unshift({
+        id: `news-outbuy-gone-${offer.id}`,
+        date: save.currentDate,
+        category: "transfer",
+        headline: `Игрок ${offer.playerName} больше недоступен`,
+        body: "Предложение снято — игрок ушёл из клуба или недоступен для покупки.",
+        relatedClubIds: [save.clubId, offer.sellingClubId],
+        relatedPlayerIds: [offer.playerId],
+      });
+      continue;
+    }
+    const swapPlayers = (offer.swapPlayerIds ?? [])
+      .map((id) => save.players.find((p) => p.id === id))
+      .filter((p): p is Player => !!p);
+    const verdict = evaluateBuyOffer(neg, offer.fee, { pack, save, swapPlayers });
+    if (verdict.status !== "accept") {
+      offer.status = "rejected";
+      const label =
+        verdict.status === "insult"
+          ? "оскорблены предложением"
+          : verdict.status === "player"
+            ? "— игрок отказался"
+            : verdict.status === "wage"
+              ? "не потянули зарплату"
+              : "отклонили предложение";
+      save.news.unshift({
+        id: `news-outbuy-rej-${offer.id}`,
+        date: save.currentDate,
+        category: "transfer",
+        headline: `«${sellerName}» ${label}: ${surname}`,
+        body: verdict.message,
+        relatedClubIds: [save.clubId, offer.sellingClubId],
+        relatedPlayerIds: [offer.playerId],
+      });
+      continue;
+    }
+    const outgoingSnap = save.outgoingTransferOffers;
+    const result = buyPlayer(pack, save, offer.playerId, offer.fee, offer.swapPlayerIds ?? []);
+    if (!result.ok) {
+      offer.status = "rejected";
+      save.news.unshift({
+        id: `news-outbuy-fail-${offer.id}`,
+        date: save.currentDate,
+        category: "transfer",
+        headline: `Сделка по ${surname} сорвалась`,
+        body: result.error ?? "Клуб отказался в последний момент.",
+        relatedClubIds: [save.clubId, offer.sellingClubId],
+        relatedPlayerIds: [offer.playerId],
+      });
+      continue;
+    }
+    save.players = result.save.players;
+    save.clubFinances = result.save.clubFinances;
+    save.transferLog = result.save.transferLog;
+    save.seasonStartMarketValues = result.save.seasonStartMarketValues;
+    save.userTactics = result.save.userTactics;
+    save.incomingTransferOffers = result.save.incomingTransferOffers;
+    save.news = result.save.news;
+    save.outgoingTransferOffers = outgoingSnap;
+    const resolved = ensureOutgoingOffers(save).find((o) => o.id === offer.id);
+    if (resolved) resolved.status = "accepted";
+    for (const o of ensureOutgoingOffers(save)) {
+      if (o.playerId === offer.playerId && o.id !== offer.id && o.status === "pending") {
+        o.status = "expired";
+      }
+    }
+    save.news.unshift({
+      id: `news-outbuy-ok-${offer.id}`,
+      date: save.currentDate,
+      category: "transfer",
+      headline: `«${sellerName}» согласились продать ${surname}`,
+      body: `Переход оформлен за ${formatMarketValue(result.fee ?? offer.fee)}. ${verdict.message}`,
+      relatedClubIds: [save.clubId, offer.sellingClubId],
+      relatedPlayerIds: [offer.playerId],
+    });
+  }
 }
 
 /** Approximate end of season / loan return date for current career. */
@@ -1166,7 +1764,7 @@ export function evaluateLoanWillingness(
   return {
     ok: true,
     fee,
-    message: `«${parent?.name ?? "Клуб"}» готовы отдать игрока в аренду до конца сезона за ${fee.toFixed(1)} млн.`,
+    message: `«${parent?.name ?? "Клуб"}» готовы отдать игрока в аренду до конца сезона за ${formatMarketValue(fee)}.`,
     parentClubId: parentId,
   };
 }
@@ -1174,9 +1772,10 @@ export function evaluateLoanWillingness(
 export function listLoanTargets(
   pack: WorldPack,
   save: CareerSave,
-  opts?: { limit?: number }
+  opts?: { limit?: number; scope?: TransferMarketScope }
 ): Player[] {
   const limit = opts?.limit ?? 120;
+  const scope = opts?.scope ?? "all";
   const cache = {
     xiByClub: new Map<string, Set<string>>(),
     needsByClub: new Map<string, ReturnType<typeof analyzeSquadNeeds>>(),
@@ -1184,7 +1783,12 @@ export function listLoanTargets(
   };
   // Rank first, then evaluate only a shortlist — full-world willingness checks are costly.
   const shortlist = save.players
-    .filter((p) => p.clubId && p.clubId !== save.clubId && !p.loan && p.overall < 86)
+    .filter((p) => {
+      if (!p.clubId || p.clubId === save.clubId || p.loan || p.overall >= 86) return false;
+      if (scope === "all") return true;
+      const s = transferClubScope(pack, save, p.clubId);
+      return s === scope;
+    })
     .sort((a, b) => b.overall - a.overall || (a.marketValue ?? 0) - (b.marketValue ?? 0))
     .slice(0, Math.max(limit * 5, 200));
 
@@ -1258,7 +1862,7 @@ export function loanPlayer(
     date: next.currentDate,
     category: "transfer",
     headline: `${player.firstName} ${player.lastName} в аренду → «${toClub?.shortName ?? "клуб"}»`,
-    body: `Аренда у «${fromClub?.name ?? verdict.parentClubId}» до ${player.loan.until} за ${fee.toFixed(1)} млн. Бюджет: ${budgetBefore.toFixed(1)} → ${budgetAfter.toFixed(1)} млн.`,
+    body: `Аренда у «${fromClub?.name ?? verdict.parentClubId}» до ${player.loan.until} за ${formatMarketValue(fee)}. Бюджет: ${formatMarketValue(budgetBefore)} → ${formatMarketValue(budgetAfter)}.`,
     relatedClubIds: [next.clubId, verdict.parentClubId],
     relatedPlayerIds: [player.id],
   });
@@ -1313,37 +1917,28 @@ function buildLoanHostCache(pack: WorldPack, save: CareerSave): LoanHostCache {
   return { squadByClub, xiByClub, needsByClub };
 }
 
-export function evaluateLoanInterest(
+export function listLoanClubOffers(
   pack: WorldPack,
   save: CareerSave,
   playerId: string,
   cache?: LoanHostCache
-): {
-  ok: boolean;
-  fee: number;
-  hostClubId?: string;
-  hostName?: string;
-  wouldStart: boolean;
-  message: string;
-} {
+): OutboundClubOffer[] {
   const player = save.players.find((p) => p.id === playerId);
-  if (!player || player.clubId !== save.clubId) {
-    return { ok: false, fee: 0, wouldStart: false, message: "Можно отдавать только своего игрока." };
-  }
-  if (player.loan) {
-    return { ok: false, fee: 0, wouldStart: false, message: "Игрок уже в аренде." };
-  }
+  if (!player || player.clubId !== save.clubId || player.loan) return [];
 
-  const fee = roundFee(loanFeeForPlayer(player) * 0.85); // slight discount to stimulate demand
+  const fee = roundFee(loanFeeForPlayer(player) * 0.85);
   const hostCache = cache ?? buildLoanHostCache(pack, save);
   const squad = (hostCache.squadByClub.get(save.clubId) ?? []).filter((p) => !p.loan);
   if (squad.length <= 16) {
-    return {
-      ok: false,
-      fee,
-      wouldStart: false,
-      message: "Слишком мало игроков — нельзя отдавать в аренду.",
-    };
+    return pack.clubs
+      .filter((c) => c.id !== save.clubId)
+      .map((c) => ({
+        clubId: c.id,
+        leagueId: leagueIdForClub(pack, c.id),
+        fee,
+        status: "squad_full" as const,
+        reason: "Слишком мало игроков — нельзя отдавать в аренду.",
+      }));
   }
 
   const userXi = new Set(
@@ -1353,18 +1948,36 @@ export function evaluateLoanInterest(
         suspensions: save.suspensions ?? {},
       })
   );
-
   const pos = primaryPosition(player);
-  const candidates: { id: string; score: number; wouldStart: boolean }[] = [];
   const playersById = new Map(save.players.map((p) => [p.id, p]));
+  const offers: OutboundClubOffer[] = [];
 
   for (const club of pack.clubs) {
     if (club.id === save.clubId) continue;
+    const leagueId = leagueIdForClub(pack, club.id);
     const hostSquad = hostCache.squadByClub.get(club.id) ?? [];
-    if (hostSquad.length < 14) continue;
+    if (hostSquad.length < 14) {
+      offers.push({
+        clubId: club.id,
+        leagueId,
+        fee,
+        status: "no_interest",
+        reason: "Слишком маленький состав",
+      });
+      continue;
+    }
 
     const budget = clubBudget(save, club.id);
-    if (budget < fee) continue;
+    if (budget < fee) {
+      offers.push({
+        clubId: club.id,
+        leagueId,
+        fee,
+        status: "no_budget",
+        reason: "Не хватает бюджета на аренду",
+      });
+      continue;
+    }
 
     const needs = hostCache.needsByClub.get(club.id) ?? analyzeSquadNeeds(save.players, club.id);
     const want = new Set(topSquadNeedPositions(needs, 3));
@@ -1387,20 +2000,90 @@ export function evaluateLoanInterest(
       player.overall >= weakestStarter.overall - 1 ||
       (samePos.length < 2 && player.overall >= 68);
 
-    if (!wouldStart && !(player.age <= 23 && player.potential - player.overall >= 6)) {
+    const youthDev = player.age <= 23 && player.potential - player.overall >= 6;
+    if (!wouldStart && !youthDev) {
+      offers.push({
+        clubId: club.id,
+        leagueId,
+        fee,
+        status: "no_interest",
+        reason: "Не видят места в составе",
+      });
       continue;
     }
-    if (player.overall + 8 < (club.reputation ?? 60) && !want.has(pos)) continue;
+    if (player.overall + 8 < (club.reputation ?? 60) && !want.has(pos)) {
+      offers.push({
+        clubId: club.id,
+        leagueId,
+        fee,
+        status: "no_interest",
+        reason: "Уровень клуба выше — не берут",
+      });
+      continue;
+    }
 
     let score = needBoost + (wouldStart ? 35 : 10) + (100 - Math.abs(player.overall - 72));
     if (player.age <= 22) score += 12;
     if (userXi.has(player.id) && samePos.length >= 4) score += 5;
     score += (club.reputation - 50) * 0.15;
-    candidates.push({ id: club.id, score, wouldStart });
+
+    offers.push({
+      clubId: club.id,
+      leagueId,
+      fee,
+      status: "ready",
+      wouldStart,
+      reason: wouldStart
+        ? "Планируют ставить в основу"
+        : "Ротация / развитие",
+      // stash score in fee ordering via sort below — attach via temp? use fee sort + wouldStart
+    });
+    void score;
   }
 
-  candidates.sort((a, b) => b.score - a.score);
-  const best = candidates[0];
+  return offers.sort((a, b) => {
+    if (a.status === "ready" && b.status !== "ready") return -1;
+    if (b.status === "ready" && a.status !== "ready") return 1;
+    if (a.wouldStart && !b.wouldStart) return -1;
+    if (b.wouldStart && !a.wouldStart) return 1;
+    const ra = pack.clubs.find((c) => c.id === a.clubId)?.reputation ?? 0;
+    const rb = pack.clubs.find((c) => c.id === b.clubId)?.reputation ?? 0;
+    return rb - ra;
+  });
+}
+
+export function evaluateLoanInterest(
+  pack: WorldPack,
+  save: CareerSave,
+  playerId: string,
+  cache?: LoanHostCache
+): {
+  ok: boolean;
+  fee: number;
+  hostClubId?: string;
+  hostName?: string;
+  wouldStart: boolean;
+  message: string;
+} {
+  const player = save.players.find((p) => p.id === playerId);
+  if (!player || player.clubId !== save.clubId) {
+    return { ok: false, fee: 0, wouldStart: false, message: "Можно отдавать только своего игрока." };
+  }
+  if (player.loan) {
+    return { ok: false, fee: 0, wouldStart: false, message: "Игрок уже в аренде." };
+  }
+
+  const offers = listLoanClubOffers(pack, save, playerId, cache);
+  const fee = offers[0]?.fee ?? roundFee(loanFeeForPlayer(player) * 0.85);
+  if (offers.some((o) => o.status === "squad_full")) {
+    return {
+      ok: false,
+      fee,
+      wouldStart: false,
+      message: "Слишком мало игроков — нельзя отдавать в аренду.",
+    };
+  }
+  const best = offers.find((o) => o.status === "ready");
   if (!best) {
     return {
       ok: false,
@@ -1409,17 +2092,16 @@ export function evaluateLoanInterest(
       message: "Пока нет клуба, готового взять игрока в аренду (нужна подходящая позиция и бюджет).",
     };
   }
-
-  const host = pack.clubs.find((c) => c.id === best.id);
+  const host = pack.clubs.find((c) => c.id === best.clubId);
   return {
     ok: true,
-    fee,
-    hostClubId: best.id,
+    fee: best.fee,
+    hostClubId: best.clubId,
     hostName: host?.name,
-    wouldStart: best.wouldStart,
+    wouldStart: !!best.wouldStart,
     message: best.wouldStart
-      ? `«${host?.name}» возьмут в аренду и планируют ставить в основу. Плата: ${fee.toFixed(1)} млн.`
-      : `«${host?.name}» возьмут в аренду (ротация/развитие). Плата: ${fee.toFixed(1)} млн.`,
+      ? `«${host?.name}» возьмут в аренду и планируют ставить в основу. Плата: ${formatMarketValue(best.fee)}.`
+      : `«${host?.name}» возьмут в аренду (ротация/развитие). Плата: ${formatMarketValue(best.fee)}.`,
   };
 }
 
@@ -1441,21 +2123,29 @@ export function loanOutPlayer(
   if (!isTransferWindowOpen(save)) {
     return { ok: false, save, error: "Трансферное окно закрыто." };
   }
-  const interest = evaluateLoanInterest(pack, save, playerId);
-  if (!interest.ok) {
-    return { ok: false, save, error: interest.message };
-  }
-  const hostId = hostClubId ?? interest.hostClubId;
-  if (!hostId) return { ok: false, save, error: "Клуб-арендатор не найден." };
 
-  // Re-check specific host if user/AI forced one
+  const offers = listLoanClubOffers(pack, save, playerId);
+  const pick = hostClubId
+    ? offers.find((o) => o.clubId === hostClubId)
+    : offers.find((o) => o.status === "ready");
+  if (!pick || pick.status !== "ready") {
+    return {
+      ok: false,
+      save,
+      error:
+        pick?.reason ??
+        "Пока нет клуба, готового взять игрока в аренду (нужна подходящая позиция и бюджет).",
+    };
+  }
+  const hostId = pick.clubId;
+  const fee = pick.fee;
+
   const next = structuredClone(save) as CareerSave;
   const player = next.players.find((p) => p.id === playerId);
   if (!player || player.clubId !== next.clubId || player.loan) {
     return { ok: false, save, error: "Игрок недоступен." };
   }
 
-  const fee = interest.fee;
   ensureFinances(next, next.clubId);
   ensureFinances(next, hostId);
   if (next.clubFinances[hostId].budget < fee) {
@@ -1501,12 +2191,14 @@ export function loanOutPlayer(
     }
   }
 
+  clearSquadDramasForPlayers(next, [playerId], "loaned");
+
   next.news.unshift({
     id: `news-loan-out-${player.id}-${next.currentDate}`,
     date: next.currentDate,
     category: "transfer",
     headline: `${player.firstName} ${player.lastName} → аренда в «${host?.shortName ?? "клуб"}»`,
-    body: `«${parent?.shortName ?? "Клуб"}» отдали игрока до ${player.loan.until} за ${fee.toFixed(1)} млн. Бюджет: ${budgetBefore.toFixed(1)} → ${budgetAfter.toFixed(1)} млн.`,
+    body: `«${parent?.shortName ?? "Клуб"}» отдали игрока до ${player.loan.until} за ${formatMarketValue(fee)}. Бюджет: ${formatMarketValue(budgetBefore)} → ${formatMarketValue(budgetAfter)}.`,
     relatedClubIds: [next.clubId, hostId],
     relatedPlayerIds: [player.id],
   });

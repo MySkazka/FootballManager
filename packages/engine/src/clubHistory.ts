@@ -236,6 +236,54 @@ function pushHonour(
   byClub.set(clubId, list);
 }
 
+/** Russian “N-кратный обладатель” for 2+ wins; empty for a single win. */
+export function timesHolderPhrase(count: number): string {
+  if (count <= 1) return "";
+  return `${count}-кратный обладатель`;
+}
+
+/**
+ * Collapse year-per-row honour strings into one line per competition.
+ * 1 win: `"Чемпион страны (2001)"`
+ * 2+: `"Чемпион страны. 3-кратный обладатель (2001, 2004, 2020)"`
+ */
+export function groupHonoursForDisplay(rawHonours: string[]): string[] {
+  const byComp = new Map<string, number[]>();
+  for (const h of rawHonours) {
+    const m = h.match(/^(.*) \((\d{4})\)$/);
+    if (!m) {
+      // Preserve unexpected strings as-is
+      if (!byComp.has(h)) byComp.set(h, []);
+      continue;
+    }
+    const competition = m[1]!;
+    const year = Number(m[2]);
+    const years = byComp.get(competition) ?? [];
+    if (!years.includes(year)) years.push(year);
+    byComp.set(competition, years);
+  }
+
+  const lines: { competition: string; years: number[]; line: string }[] = [];
+  for (const [competition, years] of byComp) {
+    const sorted = [...years].sort((a, b) => a - b);
+    let line = competition;
+    if (sorted.length === 1) {
+      line = `${competition} (${sorted[0]})`;
+    } else if (sorted.length > 1) {
+      line = `${competition}. ${timesHolderPhrase(sorted.length)} (${sorted.join(", ")})`;
+    }
+    lines.push({ competition, years: sorted, line });
+  }
+
+  // Most recent win first (same visual priority as the old year-desc list)
+  lines.sort((a, b) => {
+    const ya = a.years[a.years.length - 1] ?? 0;
+    const yb = b.years[b.years.length - 1] ?? 0;
+    return yb - ya || a.competition.localeCompare(b.competition);
+  });
+  return lines.map((l) => l.line);
+}
+
 const honoursCache = new WeakMap<WorldPack, Map<string, string[]>>();
 
 function honoursForPack(pack: WorldPack, latestCompletedYear: number): Map<string, string[]> {
@@ -275,10 +323,11 @@ export function buildClubHistory(pack: WorldPack, clubId: string): ClubHistory |
   const latestCompletedYear = seasonYear - 1;
 
   const worldHonours = honoursForPack(pack, latestCompletedYear);
-  const honours = (worldHonours.get(clubId) ?? []).filter((h) => {
+  const rawHonours = (worldHonours.get(clubId) ?? []).filter((h) => {
     const year = Number(h.match(/\((\d{4})\)\s*$/)?.[1] ?? 0);
     return year >= founded + 5 && year <= latestCompletedYear;
   });
+  const honours = groupHonoursForDisplay(rawHonours);
 
   const positions: Position[] = ["GK", "DF", "MF", "FW", "MF", "DF"];
   const legends: ClubLegend[] = [];
